@@ -22,6 +22,9 @@ class ProxyNode(BaseModel):
     alpn: str | None = None
     pbk: str | None = None  # reality public key
     sid: str | None = None  # reality short id
+    skip_cert_verify: bool | None = (
+        None  # trojan/vless self-signed cert (allowInsecure)
+    )
     raw: str  # original URI / serialized form
     name: str | None = None
     # runtime-only (not in URI): liveness + provenance

@@ -95,6 +95,8 @@ def node_to_uri(n: ProxyNode) -> str:
         qs["pbk"] = n.pbk
     if n.sid:
         qs["sid"] = n.sid
+    if n.skip_cert_verify:
+        qs["allowInsecure"] = "1"
     if n.sni or n.flow or n.pbk:
         qs["security"] = "tls"
     qstr = urlencode(qs, quote_via=quote)
@@ -250,6 +252,9 @@ def _parse_query_uri(uri: str, proto: str) -> ProxyNode | None:
     node.alpn = q.get("alpn") or None
     node.pbk = q.get("pbk") or q.get("public-key") or None
     node.sid = q.get("sid") or q.get("short-id") or None
+    # allowInsecure=1 / true -> self-signed cert tolerated (clash skip-cert-verify)
+    ai = (q.get("allowInsecure") or q.get("allowinsecure") or "").lower()
+    node.skip_cert_verify = True if ai in ("1", "true") else None
     return node
 
 

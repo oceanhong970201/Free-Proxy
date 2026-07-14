@@ -126,7 +126,9 @@ def to_clash_dict(n: ProxyNode) -> dict:
         d["password"] = n.password or ""
         if not n.sni:
             d["sni"] = n.host
-        d["skip-cert-verify"] = False
+        d["skip-cert-verify"] = (
+            bool(n.skip_cert_verify) if n.skip_cert_verify is not None else False
+        )
     elif n.proto in ("hysteria2", "hy2"):
         d["password"] = n.password or ""
         if not n.sni:
@@ -164,7 +166,10 @@ def to_clash_dict(n: ProxyNode) -> dict:
     # tls/skip-cert-verify when sni or reality present
     if (n.sni or n.pbk) and "tls" not in d:
         d["tls"] = True
-        d.setdefault("skip-cert-verify", False)
+        if "skip-cert-verify" not in d:
+            d["skip-cert-verify"] = (
+                bool(n.skip_cert_verify) if n.skip_cert_verify is not None else False
+            )
     return d
 
 

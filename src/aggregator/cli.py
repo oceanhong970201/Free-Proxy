@@ -130,6 +130,12 @@ def _parse_logic() -> dict:
     chash = dedupe.content_hash(unique)
 
     conn = _init_db()
+    # Reset the nodes table to the current snapshot. Without this, rows from
+    # dropped sources (barryfar/nomorewalls) and stale vpnsuper URIs (name
+    # changes between runs create new PKs, so INSERT OR REPLACE never evicts
+    # the old ones) accumulate indefinitely and pollute verify's node load +
+    # the emitted live.jsonl. sources table is preserved (upserted below).
+    conn.execute("DELETE FROM nodes")
     now = _now()
     for s in _read_sources():
         conn.execute(
@@ -266,7 +272,7 @@ def _parse_latency(value: str) -> int | None:
         return None
 
 
-def _verify_logic() -> dict:
+def _verify_logic(max_runtime: int | None = None) -> dict:
     """Two-tier quality screening via clash-speedtest (Go, embedded mihomo).
 
     Tier 1 (latency / fast mode): all nodes, --fast, batched (50/batch,
@@ -291,6 +297,9 @@ def _verify_logic() -> dict:
     t1_conc = int(q.get("tier1_concurrent", 50))
     t2_conc = int(q.get("tier2_concurrent", 10))
     dl_size = int(q.get("download_size_bytes", 10485760))
+
+    start_t = time.time()
+    timed_out = False
 
     conn = _init_db()
     rows = conn.execute(
@@ -370,7 +379,101 @@ def _verify_logic() -> dict:
         return None
 
     tier1_alive: dict[str, int] = {}  # host:port -> latency_ms
+    tier2_speeds: dict[str, float] = {}  # host:port -> MB/s (declared early for resume)
+    tier2_tested_hps: set[str] = set()  # Tier-2 tested host:ports (resume)
+    reachable: set[str] = set()  # TCP-reachable host:ports (pre-filter, resume)
+
+    # ---- resume support ----
+    # A full verify of thousands of nodes can't finish inside one bash command
+    # (10-min cap) or a single CI job window. Persist per-batch progress to
+    # state/verify-progress.json and resume from the last completed batch on
+    # the next run. The fingerprint ties progress to the current node set; a
+    # fresh fetch/parse changes it and discards stale progress automatically.
+    PROGRESS_FILE = STATE / "verify-progress.json"
+
+    def _fingerprint() -> str:
+        if not all_proxies:
+            return "0"
+        return f"{len(all_proxies)}:{all_proxies[0].get('server', '')}:{all_proxies[-1].get('server', '')}"
+
+    resume_idx = 0
+    try:
+        if PROGRESS_FILE.exists():
+            p = json.loads(PROGRESS_FILE.read_text(encoding="utf-8"))
+            if p.get("fingerprint") == _fingerprint():
+                tier1_alive = dict(p.get("tier1_alive", {}))
+                tier2_speeds = dict(p.get("tier2_speeds", {}))
+                tier2_tested_hps = set(p.get("tier2_tested_hps", []))
+                reachable = set(p.get("reachable", []))
+                resume_idx = int(p.get("tier1_idx", 0))
+                console.print(
+                    f"[cyan]resuming verify from T1 idx={resume_idx} "
+                    f"(alive={len(tier1_alive)}, t2_speeds={len(tier2_speeds)})"
+                )
+            else:
+                console.print("[dim]verify-progress fingerprint mismatch — fresh start")
+    except Exception as e:
+        console.print(f"[yellow]load verify-progress failed (non-blocking): {e}")
+
+    def _save_progress(t1_idx: int) -> None:
+        try:
+            PROGRESS_FILE.write_text(
+                json.dumps(
+                    {
+                        "fingerprint": _fingerprint(),
+                        "tier1_alive": tier1_alive,
+                        "tier1_idx": t1_idx,
+                        "tier2_speeds": tier2_speeds,
+                        "tier2_tested_hps": list(tier2_tested_hps),
+                        "reachable": list(reachable),
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+
     if binary and all_proxies:
+        # ---- TCP pre-filter: cheap connect gate before the expensive
+        # clash-speedtest pass. Only runs on a fresh start (resume_idx==0 and
+        # no saved reachable set); a resumed run reuses the reachable set from
+        # progress so tier1_idx stays consistent with the filtered ordering. ----
+        if resume_idx == 0 and not reachable:
+            # bootstrap-safe import: cli.py may run bare (no parent package),
+            # and src/ is already on sys.path via the module-top bootstrap.
+            from aggregator import tcp_prefilter
+
+            # Fresh start: clear stale alive/latency/speed from prior partial
+            # runs so total_alive reflects ONLY this run's measurements.
+            # (Without this, DB rows from earlier verifies inflate alive
+            # counts and pollute the partial publish.)
+            c = _init_db()
+            c.execute(
+                "UPDATE nodes SET alive=NULL, latency_ms=NULL, download_speed=NULL"
+            )
+            c.commit()
+            c.close()
+            for n in nodes:
+                n.alive = None
+                n.latency_ms = None
+                n.download_speed = None
+            console.print("[cyan]running TCP pre-filter (connect 443)...")
+            reachable = tcp_prefilter.run(all_proxies)
+            _save_progress(0)
+        filtered_proxies = (
+            [
+                p
+                for p in all_proxies
+                if f"{p.get('server')}:{p.get('port')}" in reachable
+            ]
+            if reachable
+            else list(all_proxies)
+        )
+        console.print(
+            f"[cyan]TCP pre-filter: {len(filtered_proxies)}/{len(all_proxies)} "
+            f"reachable -> Tier 1"
+        )
         # ---- Tier 1: fast mode latency screening, batched ----
         console.rule("[bold cyan]Tier 1 — latency screening (fast mode)")
         BATCH1 = 50
@@ -394,9 +497,16 @@ def _verify_logic() -> dict:
                     if lat < max_latency_ms:
                         tier1_alive[hp] = lat
 
-        total = len(all_proxies)
-        for i in range(0, total, BATCH1):
-            chunk = all_proxies[i : i + BATCH1]
+        total = len(filtered_proxies)
+        for i in range(resume_idx, total, BATCH1):
+            if max_runtime and (time.time() - start_t) > max_runtime:
+                console.print(
+                    f"[yellow]max-runtime {max_runtime}s reached — pausing T1 at "
+                    f"idx={i}/{total}, alive={len(tier1_alive)} (resume next run)"
+                )
+                timed_out = True
+                break
+            chunk = filtered_proxies[i : i + BATCH1]
             with tmp1.open("w", encoding="utf-8") as fh:
                 _yaml.safe_dump({"proxies": chunk}, fh, allow_unicode=True)
             try:
@@ -426,7 +536,9 @@ def _verify_logic() -> dict:
             console.print(
                 f"[dim]T1 batch {i}-{i+len(chunk)}/{total} done, alive={len(tier1_alive)}"
             )
+            _save_progress(i + len(chunk))
         tmp1.unlink(missing_ok=True)
+        _save_progress(total)  # Tier 1 fully done
         console.print(f"[green]Tier 1 alive: {len(tier1_alive)}")
         # M3: warn on unparsed clash-speedtest rows (likely a format drift).
         if unparsed_t1:
@@ -436,7 +548,7 @@ def _verify_logic() -> dict:
             )
         # M3 sanity check: tier1_alive=0 with a large node set usually means parse
         # failure rather than genuinely-dead nodes.
-        if not tier1_alive and len(all_proxies) > 100:
+        if not tier1_alive and len(filtered_proxies) > 100:
             console.print(
                 "[yellow]WARNING: tier1_alive=0 but >100 nodes were tested — possible "
                 "clash-speedtest output parse failure (check row format)"
@@ -449,12 +561,13 @@ def _verify_logic() -> dict:
             n.alive = True
             n.latency_ms = tier1_alive[hp]
             n.download_speed = None  # reset before Tier 2
-        elif binary and (tier1_alive or all_proxies):
+        elif not timed_out and binary and (tier1_alive or all_proxies):
             n.alive = False
             n.latency_ms = None
             n.download_speed = None
+        # timed_out: leave untested nodes alive=None so they resume next run
+        # and publish (non-strict) can still ship them as unverified.
 
-    tier2_speeds: dict[str, float] = {}  # host:port -> MB/s
     tier2_tested = 0
     if binary and tier1_alive:
         # ---- Tier 2: download mode speed test, only alive nodes, batched ----
@@ -499,7 +612,23 @@ def _verify_logic() -> dict:
 
         total2 = len(alive_proxies)
         for i in range(0, total2, BATCH2):
-            chunk = alive_proxies[i : i + BATCH2]
+            if max_runtime and (time.time() - start_t) > max_runtime:
+                console.print(
+                    f"[yellow]max-runtime {max_runtime}s reached — pausing T2 at "
+                    f"idx={i}/{total2}, passed={len(tier2_speeds)} (resume next run)"
+                )
+                timed_out = True
+                break
+            batch = alive_proxies[i : i + BATCH2]
+            # skip proxies already tested in a prior (resumed) run
+            chunk = [
+                p
+                for p in batch
+                if f"{p.get('server')}:{p.get('port')}" not in tier2_tested_hps
+            ]
+            tier2_tested += len(batch)
+            if not chunk:
+                continue
             with tmp2.open("w", encoding="utf-8") as fh:
                 _yaml.safe_dump({"proxies": chunk}, fh, allow_unicode=True)
             try:
@@ -525,17 +654,19 @@ def _verify_logic() -> dict:
                     encoding="utf-8",
                 )
                 _parse_t2(proc.stdout)
-                tier2_tested += len(chunk)
             except subprocess.TimeoutExpired:
                 console.print(
                     f"[yellow]T2 batch {i}-{i+len(chunk)} timed out ({TIMEOUT2}s) — partial"
                 )
-                tier2_tested += len(chunk)
             except Exception as e:
                 console.print(f"[yellow]T2 batch {i} failed (non-blocking): {e}")
+            # mark this window's proxies tested (resume skips them next run)
+            for p in batch:
+                tier2_tested_hps.add(f"{p.get('server')}:{p.get('port')}")
             console.print(
-                f"[dim]T2 batch {i}-{i+len(chunk)}/{total2} done, passed={len(tier2_speeds)}"
+                f"[dim]T2 batch {i}-{i+len(batch)}/{total2} done, passed={len(tier2_speeds)}"
             )
+            _save_progress(total)
         tmp2.unlink(missing_ok=True)
         console.print(
             f"[green]Tier 2 passed (>= {min_dl_mbps} MB/s): {len(tier2_speeds)}"
@@ -592,6 +723,15 @@ def _verify_logic() -> dict:
         "total_alive": total_alive,
         "unverified": sum(1 for n in nodes if n.alive is None),
     }
+    summary["completed"] = not timed_out
+    if not timed_out:
+        # verify completed fully — clear resume progress so the next run starts fresh
+        try:
+            (STATE / "verify-progress.json").unlink(missing_ok=True)
+        except Exception:
+            pass
+    else:
+        console.print("[yellow]verify paused (partial) — progress saved for resume")
     _write_last_run(1, {"verify": summary}, extra={"last_stage_cmd": "verify"})
     return summary
 
@@ -757,10 +897,17 @@ def parse() -> None:
 
 
 @app.command()
-def verify() -> None:
+def verify(
+    max_runtime: int = typer.Option(
+        0,
+        "--max-runtime",
+        "-t",
+        help="Max wall-clock seconds before graceful pause (saves progress, resumes next run). 0 = no limit.",
+    ),
+) -> None:
     """Two-tier quality screening via clash-speedtest (latency + download speed)."""
     console.rule("[bold yellow]verify (Tier1 latency + Tier2 download)")
-    summary = _verify_logic()
+    summary = _verify_logic(max_runtime=max_runtime or None)
     _print_table("verify summary", summary)
 
 

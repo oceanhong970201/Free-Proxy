@@ -164,11 +164,15 @@ def _server_to_trojan_uri(s: dict) -> str | None:
     country = str(s.get("country") or "").strip()
     alias = str(s.get("alias_name") or "").strip()
     name = f"vpnsuper-{country}-{alias}-{host}" if country else f"vpnsuper-{host}"
-    # trojan://password@host:port?security=tls&sni=host#name
-    # sni = host keeps it simple; trojan uses TLS so security=tls is set.
+    # trojan://password@host:port?security=tls&sni=host&allowInsecure=1#name
+    # allowInsecure=1: VPN Super trojan servers use IP + self-signed TLS certs,
+    # so without skip-cert-verify the TLS handshake fails and the node reads
+    # as dead to mihomo/clash-speedtest. sni=host keeps it simple.
     from urllib.parse import quote, urlencode
 
-    qs = urlencode({"security": "tls", "sni": host}, quote_via=quote)
+    qs = urlencode(
+        {"security": "tls", "sni": host, "allowInsecure": "1"}, quote_via=quote
+    )
     frag = quote(name)
     return f"trojan://{password}@{host}:{port}?{qs}#{frag}"
 
