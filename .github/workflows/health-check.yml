@@ -31,7 +31,7 @@ jobs:
 
       - name: Open issue on failure
         if: failure()
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         env:
           HTTP_CODE: ${{ steps.ping.outputs.http_code }}
           WORKER_URL: ${{ vars.WORKER_BASE_URL || 'https://proxy-sub-aggregator.proxy-aggregator.workers.dev' }}
