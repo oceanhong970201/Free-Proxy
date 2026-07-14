@@ -302,6 +302,20 @@ async def run_recon() -> dict:
     rate = float(cfg.get("rate_limit_seconds", 1.0))
 
     hosts: list[tuple[str, int | None, str | None]] = []
+    # 1a. Config `recon_targets` — public/known demo panels for fingerprint
+    # practice (NEVER exploited). Same shape as `targets`.
+    for t in cfg.get("recon_targets") or []:
+        host_field = str(t.get("host", "")).strip()
+        if not host_field:
+            continue
+        host, p = _split_host_port(host_field, default_port=443)
+        port = t.get("port") or p
+        scheme = t.get("scheme")
+        hosts.append((host, port, scheme))
+
+    # 1b. Config `targets` are also fingerprinted in recon mode (they are
+    # self-owned panels, so fingerprinting them is safe and useful even when
+    # not running --exploit).
     for t in cfg.get("targets") or []:
         host_field = str(t.get("host", "")).strip()
         if not host_field:
@@ -639,8 +653,6 @@ async def run_exploit() -> dict:
 
     _log(f"exploit done: {summary}")
     return summary
-
-
 
 
 # ---------------------------------------------------------------------------

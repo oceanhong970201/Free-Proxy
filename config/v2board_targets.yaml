@@ -1,7 +1,28 @@
-# Stage 17 — A2 V2Board/Xboard recon targets.
+# ---------------------------------------------------------------------------
+# recon_targets — public/known demo panels for fingerprint PRACTICE only.
+# These are NEVER exploited. They are fingerprinted via the two public
+# endpoints (GET /api/v1/guest/comm/config + GET /api/v1/admin/config/fetch)
+# so the recon pipeline has something to exercise when recon_intel.jsonl is
+# empty. Leave the list empty to rely solely on ct_recon's recon_intel.jsonl.
 #
-# ONLY list self-owned / authorized panels under `targets`. Wild panels are
-# recon-only (fingerprinted from recon_intel.jsonl) and NEVER exploited.
+# NOTE: do NOT add panels you do not own/authorize here. Wild panels discovered
+# via CT logs are already fingerprinted through `recon_from_intel` below.
+# A human may append a self-owned demo install (e.g. a local Xboard dev box)
+# to validate the fingerprint + oracle logic end-to-end.
+# ---------------------------------------------------------------------------
+recon_targets:
+  # Empty by default — fill with public demo panels or a self-owned dev box.
+  # Example shape (commented out — uncomment and point at YOUR panel):
+  #   - host: demo.example.com
+  #     port: 443
+  #     scheme: https
+  []
+
+# ---------------------------------------------------------------------------
+# targets — self-owned / authorized panels for exploit mode (--exploit).
+# CVE-2026-39912 chain is ONLY run against entries here. Wild panels are
+# recon-only and NEVER exploited. Leave empty (the default) until you have a
+# panel you own/are authorized to test against.
 #
 # Each target entry:
 #   host: panel domain or IP (no scheme)
@@ -11,7 +32,7 @@
 #          admin@demo.com — but ONLY use an email you own / are authorized to
 #          use on a self-owned panel.
 #   scheme: http | https (default https for 443/8443/etc, else http)
-
+# ---------------------------------------------------------------------------
 targets: []  # human-filled: self-owned / authorized panels
 
 # Pull wild recon candidates from state/recon_intel.jsonl (produced by

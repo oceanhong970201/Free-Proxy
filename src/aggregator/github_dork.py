@@ -72,6 +72,71 @@ def load_config() -> dict:
 # ---------------------------------------------------------------------------
 
 
+def _gh_search_one(query: str, fetch_raw: bool) -> list[dict]:
+    """Run one dork query via `gh api` (uses gh CLI auth, no PAT needed).
+
+    Returns list of hit dicts. Same policy: third-party raw never fetched.
+    """
+    hits: list[dict] = []
+    page = 1
+    total_collected = 0
+    while total_collected < CODE_SEARCH_MAX_RESULTS:
+        try:
+            proc = subprocess.run(
+                [
+                    "gh",
+                    "api",
+                    "-X",
+                    "GET",
+                    "search/code",
+                    "-f",
+                    f"q={query}",
+                    "-f",
+                    f"per_page={CODE_SEARCH_PER_PAGE}",
+                    "-f",
+                    f"page={page}",
+                    "--jq",
+                    f"[.items[] | {{repo:.repository.full_name, path:.path, html_url:.html_url}}] | "
+                    f".[]",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                encoding="utf-8",
+            )
+        except Exception as e:  # noqa: BLE001
+            _log(f"  gh api failed: {type(e).__name__}: {e}")
+            break
+        if proc.returncode != 0:
+            stderr = (proc.stderr or "").strip()
+            if "rate limit" in stderr.lower() or "403" in stderr:
+                _log("  gh rate-limited — pausing 60s.")
+                time.sleep(60)
+                continue
+            _log(f"  gh api rc={proc.returncode}: {stderr[:200]}")
+            break
+        # gh --jq emits one JSON object per line for the .[] pattern
+        for line in (proc.stdout or "").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except Exception:  # noqa: BLE001
+                continue
+            hits.append({**obj, "query": query})
+            if not fetch_raw:
+                _log(
+                    f"  third-party hit (raw NOT fetched): {obj.get('repo')}:{obj.get('path')}"
+                )
+            total_collected += 1
+        if total_collected < CODE_SEARCH_PER_PAGE:
+            break
+        page += 1
+        time.sleep(CODE_SEARCH_RATE_GAP)
+    return hits
+
+
 def _github_search_one(
     client: httpx.Client, token: str, query: str, fetch_raw: bool
 ) -> list[dict]:
@@ -151,18 +216,36 @@ def _github_search_one(
 
 
 def github_code_search(cfg: dict) -> tuple[list[dict], bool]:
-    """Run all dork queries. Returns (hits, skipped_no_token)."""
-    token = (os.environ.get("GITHUB_TOKEN") or "").strip()
-    if not token:
-        _log("GITHUB_TOKEN not set — skipping code search (log only).")
-        return [], True
+    """Run all dork queries. Returns (hits, skipped_no_token).
+
+    Prefers `gh` CLI auth (no PAT needed). Falls back to httpx+GITHUB_TOKEN.
+    """
     dorks = cfg.get("dorks") or []
     fetch_raw = bool(cfg.get("fetch_third_party_raw", False))
     if fetch_raw:
-        # Policy guard: never fetch raw third-party secrets even if flag flips.
         _log("fetch_third_party_raw is true — overriding to false (policy).")
         fetch_raw = False
     all_hits: list[dict] = []
+
+    # Prefer gh CLI (uses keyring auth, no PAT env needed)
+    gh_bin = shutil.which("gh")
+    if gh_bin:
+        _log("using `gh` CLI for code search (no PAT needed).")
+        for q in dorks:
+            _log(f"code search dork: {q}")
+            hits = _gh_search_one(q, fetch_raw)
+            _log(f"  {len(hits)} hits (raw fetch disabled; logged only).")
+            all_hits.extend(hits)
+        return all_hits, False
+
+    # Fallback: httpx + GITHUB_TOKEN
+    token = (os.environ.get("GITHUB_TOKEN") or "").strip()
+    if not token:
+        _log(
+            "GITHUB_TOKEN not set and gh CLI not available — skipping code search (log only)."
+        )
+        return [], True
+    _log("gh CLI not available — using httpx + GITHUB_TOKEN.")
     with httpx.Client(follow_redirects=True) as client:
         for q in dorks:
             _log(f"code search dork: {q}")

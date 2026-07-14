@@ -1,0 +1,61 @@
+name: tg-recon
+
+# Stage 18 — A5 Telegram underground market recon (web-preview + honeytrap
+# triage). Runs on GitHub Actions runner because the local dev machine sits
+# behind the GFW and cannot resolve t.me (getaddrinfo failed). The runner is
+# outside the wall and can reach t.me/s/<channel> public static mirrors.
+#
+# Flow:
+#   1. tg-recon     — scrape channels, honeytrap-triage, append
+#                     state/gray_nodes.jsonl
+#   2. publish-resin — attempted from CI but resin runs on localhost:2260 in
+#                     the local Docker, so it is expected to fail from the
+#                     runner; continue-on-error. gray_nodes.jsonl is committed
+#                     back to the repo, then locally `git pull` + publish-resin
+#                     pours it into resin.
+#   3. Commit        — push gray_nodes.jsonl back to the repo.
+
+on:
+  schedule:
+    - cron: '23 */6 * * *'   # every 6 hours at :23 (off-round-minute)
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: tg-recon
+  cancel-in-progress: false
+
+jobs:
+  tg-recon:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: TG web-preview recon
+        run: python src/aggregator/cli.py tg-recon
+
+      - name: Publish gray nodes to resin (if any)
+        run: python src/aggregator/cli.py publish-resin
+        env:
+          RESIN_URL: ${{ secrets.RESIN_URL || 'http://localhost:2260' }}
+          RESIN_ADMIN_TOKEN: ${{ secrets.RESIN_ADMIN_TOKEN || '48941200c6727066d94e2f77a2143e4a' }}
+        continue-on-error: true   # resin runs on localhost Docker — not reachable from CI runner
+
+      - name: Commit gray_nodes.jsonl
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add state/gray_nodes.jsonl 2>/dev/null || true
+          git diff --staged --quiet || git commit -m "tg-recon $(date -u +'%Y-%m-%d %H:%M')"
+          git push
+        continue-on-error: true
