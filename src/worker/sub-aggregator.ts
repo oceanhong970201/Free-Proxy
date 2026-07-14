@@ -28,7 +28,7 @@ export default {
     }
 
     if (pathname === "/admin/import" && request.method === "POST") {
-      return handleImport(request, env);
+      return handleImport(request, env, ctx);
     }
 
     return new Response("Not Found", { status: 404 });
@@ -39,11 +39,15 @@ export default {
   },
 };
 
-async function handleSub(_request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-  // 1. KV cache lookup
-  const cached = await env.CACHE.get(SUB_CACHE_KEY, "text");
+async function handleSub(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  const url = new URL(request.url);
+  const format = (url.searchParams.get("format") || "").toLowerCase();
+
+  // KV cache key per format
+  const cacheKey = format === "clash" ? "sub-render-clash" : SUB_CACHE_KEY;
+  const cached = await env.CACHE.get(cacheKey, "text");
   if (cached !== null) {
-    return subResponse(cached);
+    return format === "clash" ? clashResponse(cached) : subResponse(cached);
   }
 
   // 2. Query D1 for alive nodes ordered by download speed (desc) then latency (asc).
@@ -55,15 +59,31 @@ async function handleSub(_request: Request, env: Env, ctx: ExecutionContext): Pr
   ).all<{ uri: string }>();
 
   const uris = (results ?? []).map((r) => r.uri).filter((u) => !!u);
-  const body = base64Encode(uris.join("\n"));
+
+  let body: string;
+  let render: (s: string) => Response;
+  if (format === "clash") {
+    // Rebuild clash YAML proxies from URIs so Clash Verge can subscribe directly.
+    const proxies = uris.map((u, i) => uriToClashDict(u, i)).filter(Boolean);
+    const doc = { proxies };
+    body = yamlDump(doc);
+    render = clashResponse;
+  } else {
+    body = base64Encode(uris.join("\n"));
+    render = subResponse;
+  }
 
   // 3. Write to KV (TTL 60s) via waitUntil (don't block response)
-  ctx.waitUntil(env.CACHE.put(SUB_CACHE_KEY, body, { expirationTtl: SUB_CACHE_TTL }));
+  ctx.waitUntil(env.CACHE.put(cacheKey, body, { expirationTtl: SUB_CACHE_TTL }));
 
-  return subResponse(body);
+  return render(body);
 }
 
-async function handleImport(request: Request, env: Env): Promise<Response> {
+async function handleImport(
+  request: Request,
+  env: Env,
+  ctx: ExecutionContext
+): Promise<Response> {
   const token = request.headers.get("X-Admin-Token");
   if (!token || token !== env.ADMIN_TOKEN) {
     return jsonResponse({ error: "unauthorized" }, 401);
@@ -85,7 +105,13 @@ async function handleImport(request: Request, env: Env): Promise<Response> {
     return jsonResponse({ imported: 0 });
   }
 
-  // Batch upsert via INSERT OR REPLACE
+  // Mark ALL existing rows dead BEFORE re-upserting the fresh snapshot.
+  // This closes the clobber bug: stale dead nodes from a prior publish that
+  // are no longer in the fresh snapshot must NOT linger alive=1, otherwise
+  // /sub WHERE alive=1 keeps serving nodes that a later verify marked dead.
+  await env.DB.prepare("UPDATE nodes SET alive = 0").run();
+
+  // Batch upsert via INSERT OR REPLACE. Fresh snapshot rows land alive=1.
   const stmt = env.DB.prepare(
     `INSERT OR REPLACE INTO nodes (uri, proto, host, port, alive, first_seen, last_checked, content_hash)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
@@ -102,6 +128,14 @@ async function handleImport(request: Request, env: Env): Promise<Response> {
 
   const results = await env.DB.batch(batch);
   const imported = results.filter((r) => r.success).length;
+
+  // Purge KV render cache so /sub reflects the fresh snapshot immediately
+  // instead of waiting for the 60s TTL to expire.
+  ctx.waitUntil(Promise.all([
+    env.CACHE.delete("sub-render"),
+    env.CACHE.delete("sub-render-clash"),
+  ]).catch(() => {}));
+
   return jsonResponse({ imported });
 }
 
@@ -123,6 +157,154 @@ function subResponse(body: string): Response {
       "Cache-Control": "no-cache",
     },
   });
+}
+
+function clashResponse(body: string): Response {
+  return new Response(body, {
+    status: 200,
+    headers: {
+      "Content-Type": "text/yaml; charset=utf-8",
+      "Content-Disposition": 'attachment; filename="clash.yaml"',
+      "Cache-Control": "no-cache",
+    },
+  });
+}
+
+// Rebuild a clash proxy dict from a v2ray URI string.
+// Supports vmess:// (base64 JSON), vless://, trojan://, ss:// (SIP002).
+function uriToClashDict(uri: string, idx: number): Record<string, unknown> | null {
+  try {
+    const m = uri.match(/^([a-z0-9]+):\/\//i);
+    if (!m) return null;
+    const proto = m[1].toLowerCase();
+
+    if (proto === "vmess") {
+      // vmess://<base64 json>
+      const json = JSON.parse(base64Decode(uri.slice(8)));
+      const name = json.ps || `vmess-${idx}`;
+      const d: Record<string, unknown> = {
+        name: `${name}-${json.add}:${json.port}`,
+        type: "vmess",
+        server: json.add,
+        port: Number(json.port),
+        uuid: json.id,
+        alterId: Number(json.aid ?? 0),
+        cipher: json.cipher || "auto",
+        udp: true,
+        network: json.net || "tcp",
+        tls: json.tls === "tls" ? true : false,
+      };
+      if (json.path) d["path"] = json.path;
+      if (json.host) d["servername"] = json.host;
+      if (json.sni) d["sni"] = json.sni;
+      return d;
+    }
+
+    if (proto === "vless" || proto === "trojan") {
+      // scheme://userinfo@host:port?params#name
+      const u = new URL(uri);
+      const host = u.hostname;
+      const port = Number(u.port) || 443;
+      const name = decodeURIComponent(u.hash.slice(1)) || `${proto}-${host}:${port}`;
+      const params = u.searchParams;
+      const d: Record<string, unknown> = {
+        name: `${name}-${host}:${port}`,
+        type: proto,
+        server: host,
+        port,
+        udp: true,
+        network: params.get("type") || "tcp",
+        tls: true,
+      };
+      if (proto === "vless") d["uuid"] = u.username;
+      if (proto === "trojan") d["password"] = decodeURIComponent(u.username);
+      if (params.get("sni")) d["sni"] = params.get("sni");
+      if (params.get("path")) d["path"] = params.get("path");
+      if (params.get("host")) d["servername"] = params.get("host");
+      if (params.get("flow")) d["flow"] = params.get("flow");
+      if (params.get("pbk")) {
+        d["reality-opts"] = { "public-key": params.get("pbk"), "short-id": params.get("sid") || "" };
+      }
+      if (params.get("fp")) d["client-fingerprint"] = params.get("fp");
+      return d;
+    }
+
+    if (proto === "ss") {
+      // SIP002: ss://base64(method:password)@host:port#name
+      //       or ss://method:password@host:port#name (plain)
+      // Use regex to avoid new URL mangling base64 (= chars, padding).
+      const ssMatch = uri.match(/^ss:\/\/([^@?#]+)@([^:#?]+)(?::(\d+))?(?:\?(.*?))?(?:#(.*))?$/i);
+      if (!ssMatch) return null;
+      // URL-decode userinfo first (SIP002 b64 may be %-encoded, e.g. %3D = =)
+      let userinfo = decodeURIComponent(ssMatch[1]);
+      const host = ssMatch[2];
+      const port = ssMatch[3] ? Number(ssMatch[3]) : 8388;
+      // Decode base64 userinfo if it has no ':' (SIP002 b64 blob)
+      if (userinfo && !userinfo.includes(":")) {
+        try {
+          const dec = base64Decode(userinfo);
+          if (dec.includes(":")) userinfo = dec;
+        } catch {
+          /* keep raw */
+        }
+      }
+      let method = "aes-256-gcm";
+      let password = "";
+      if (userinfo.includes(":")) {
+        const idx = userinfo.indexOf(":");
+        method = userinfo.slice(0, idx);
+        password = userinfo.slice(idx + 1);
+      }
+      const nameRaw = ssMatch[5] ? decodeURIComponent(ssMatch[5]) : "";
+      const name = nameRaw || `ss-${host}:${port}`;
+      return {
+        name: `${name}-${host}:${port}`,
+        type: "ss",
+        server: host,
+        port,
+        cipher: method,
+        password,
+        udp: true,
+      };
+    }
+
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+// Minimal YAML emitter for {proxies: [...]}. No external deps.
+function yamlDump(obj: Record<string, unknown>): string {
+  if (!obj.proxies || !Array.isArray(obj.proxies)) return "proxies: []\n";
+  let out = "proxies:\n";
+  for (const p of obj.proxies) {
+    if (!p || typeof p !== "object") continue;
+    out += "  - ";
+    const entries = Object.entries(p as Record<string, unknown>);
+    for (let i = 0; i < entries.length; i++) {
+      const [k, v] = entries[i];
+      if (i > 0) out += "    ";
+      out += `${k}: ${yamlVal(v)}\n`;
+    }
+  }
+  return out;
+}
+
+function yamlVal(v: unknown): string {
+  if (v === null || v === undefined) return '""';
+  if (typeof v === "boolean") return v ? "true" : "false";
+  if (typeof v === "number") return String(v);
+  if (typeof v === "object") {
+    // inline dict or array
+    return JSON.stringify(v);
+  }
+  // string — quote if contains special chars
+  const s = String(v);
+  if (/[:#\[\]{},&*?|<>=!%@`"'\n]/.test(s)) {
+    return `"${s.replace(/"/g, '\\"')}"`;
+  }
+  return s;
 }
 
 function jsonResponse(obj: unknown, status = 200): Response {

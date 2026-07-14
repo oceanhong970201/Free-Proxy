@@ -617,42 +617,50 @@ def _publish_logic(strict: bool = False) -> dict:
         _write_last_run(1, {"publish": summary}, extra={"last_stage_cmd": "publish"})
         return summary
 
-    # load + filter
-    selected: list[ProxyNode] = []
-    none_alive_count = 0
-    dead_count = 0
+    # load all nodes once; select twice (strict first, non-strict fallback)
+    all_nodes: list[ProxyNode] = []
     for line in LIVE.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if not line:
             continue
         try:
-            n = ProxyNode(**json.loads(line))
+            all_nodes.append(ProxyNode(**json.loads(line)))
         except Exception:
             continue
-        # Publish policy: alive=True always published; alive=None (unverified)
-        # also published UNLESS --strict (so fetch.yml's no-verify run still
-        # updates the Worker with fresh nodes); alive=False (dead) always excluded.
-        if n.alive is False:
-            dead_count += 1
-            continue
-        if n.alive is None:
-            none_alive_count += 1
-            if strict:
-                continue
-        # --strict: require download_speed >= min; non-strict: accept any alive/None
-        if strict and (n.download_speed is None or n.download_speed < min_dl):
-            continue
-        selected.append(n)
 
+    def _select(strict_mode: bool) -> list[ProxyNode]:
+        out: list[ProxyNode] = []
+        for n in all_nodes:
+            if n.alive is False:
+                continue
+            if n.alive is None:
+                if strict_mode:
+                    continue
+            if strict_mode and (n.download_speed is None or n.download_speed < min_dl):
+                continue
+            out.append(n)
+        return out
+
+    selected = _select(strict)
+    # M3 clobber-bug fix: if strict yields nothing (verify crashed / fresh
+    # parse all-None), fall back to non-strict so /sub never empties.
+    fell_back = False
+    if not selected and strict:
+        console.print(
+            "[yellow]strict publish yielded 0 nodes — falling back to non-strict "
+            "(verify may have failed or produced no alive nodes)"
+        )
+        selected = _select(False)
+        fell_back = True
+
+    dead_count = sum(1 for n in all_nodes if n.alive is False)
+    none_alive_count = sum(1 for n in all_nodes if n.alive is None)
     if none_alive_count:
         console.print(
-            f"[yellow]WARNING: {none_alive_count} nodes alive=None (unverified), "
-            "excluded from publish"
+            f"[yellow]WARNING: {none_alive_count} nodes alive=None (unverified)"
         )
     if dead_count:
-        console.print(
-            f"[dim]{dead_count} nodes alive=False (dead), excluded from publish"
-        )
+        console.print(f"[dim]{dead_count} nodes alive=False (dead), excluded")
 
     selected.sort(key=lambda n: -(n.download_speed or 0.0))
     selected = selected[:top_n]
@@ -694,6 +702,8 @@ def _publish_logic(strict: bool = False) -> dict:
             "published": len(selected),
             "http_status": resp.status_code,
             "worker_response": body[:500],
+            "strict": strict,
+            "fell_back_to_nonstrict": fell_back,
         }
         if not ok:
             summary["error"] = f"HTTP {resp.status_code}"

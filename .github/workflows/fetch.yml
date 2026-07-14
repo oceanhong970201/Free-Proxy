@@ -11,7 +11,7 @@ permissions:
 jobs:
   aggregate:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45   # was 30; verify adds ~4min, keep margin under 6h limit
     concurrency:
       group: aggregate
       cancel-in-progress: false
@@ -24,21 +24,52 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install dependencies
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache: true   # speeds up clash-speedtest install via module cache
+
+      - name: Cache clash-speedtest binary
+        uses: actions/cache@v4
+        with:
+          path: ~/go/bin
+          key: clash-speedtest-${{ runner.os }}-go1.22
+
+      - name: Install clash-speedtest
+        run: |
+          if ! command -v clash-speedtest >/dev/null 2>&1; then
+            go install github.com/faceair/clash-speedtest@latest
+          fi
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Install Python dependencies
         run: pip install -r requirements.txt
 
       - name: Fetch + Parse + Emit
-        run: python src/aggregator/cli.py fetch && python src/aggregator/cli.py parse && python src/aggregator/cli.py emit
+        run: |
+          python src/aggregator/cli.py fetch
+          python src/aggregator/cli.py parse
+          python src/aggregator/cli.py emit
         env:
           TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
           TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
           TELEGRAM_SESSION_STRING: ${{ secrets.TELEGRAM_SESSION_STRING }}
 
-      - name: Publish alive nodes to Worker
-        run: python src/aggregator/cli.py publish
+      - name: Two-tier verify (latency + download speed)
+        run: python src/aggregator/cli.py verify
+        continue-on-error: true   # partial verify results still publishable
         env:
-          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+          HOME: ${{ github.workspace }}   # GOPATH/bin on PATH for clash-speedtest
+
+      - name: Re-emit with alive-only + download_speed sort
+        run: python src/aggregator/cli.py emit
+
+      - name: Publish alive nodes to Worker (strict, fallback non-strict)
+        run: python src/aggregator/cli.py publish --strict
+        env:
           WORKER_URL: ${{ secrets.WORKER_URL }}
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
 
       - name: Commit artifacts
         run: |
