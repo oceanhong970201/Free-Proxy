@@ -53,6 +53,16 @@ npx tsc --noEmit           # 型別檢查
 npx wrangler deploy        # 部署
 ```
 
+
+
+### D1 schema migration（download_speed 欄位）
+若 D1 是舊 schema 套的（沒 download_speed），部署後要 ALTER：
+```bash
+cd src/worker
+npx wrangler d1 execute nodes-db --remote --command="ALTER TABLE nodes ADD COLUMN download_speed REAL;"
+```
+若已存在會報 OperationalError，可忽略。
+
 ### 已知修復
 - `handleImport` 的 `hash()` 是 async，原本 `stmt.bind(hash(uri))` 拿到 Promise 拋 Error 1101。改成 `await Promise.all(parsed.map(hash))` 預先算好。
 - `parser.py` clash YAML / sing-box JSON 來源的 `raw` 原本存 `json.dumps(dict)`（clash JSON），改用 `node_to_uri()` 重建 `vmess://` / `vless://` URI。

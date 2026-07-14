@@ -159,11 +159,20 @@ async function hash(s: string): Promise<string> {
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-// atob / btoa are available in the Workers runtime.
+// btoa() cannot encode strings with chars > 0xff (URI names may contain
+// emoji / CJK in the vmess base64-JSON or the fragment). Encode as UTF-8
+// bytes first, then btoa the resulting binary string.
 function base64Encode(s: string): string {
-  return btoa(s);
+  const bytes = new TextEncoder().encode(s);
+  let binary = "";
+  for (const b of bytes) binary += String.fromCharCode(b);
+  return btoa(binary);
 }
 
 function base64Decode(s: string): string {
-  return atob(s.trim());
+  // atob returns a binary string; decode back to UTF-8 string.
+  const binary = atob(s.trim());
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return new TextDecoder().decode(bytes);
 }
