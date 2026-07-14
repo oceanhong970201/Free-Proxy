@@ -63,7 +63,9 @@ jobs:
         run: |
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add output/ state/last-run.json state/live.jsonl 2>/dev/null || true
+          # state/last-run.json + state/live.jsonl are gitignored (runtime artifacts)
+          # — adding them warns + can exit 1; only commit the output snapshot.
+          git add output/
           git diff --staged --quiet || git commit -m "daily verify $(date -u +'%Y-%m-%d %H:%M')"
           git push
         continue-on-error: true   # commit failure is non-fatal
