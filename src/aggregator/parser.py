@@ -461,7 +461,7 @@ def parse_raw(source_format: str, text: str) -> list[ProxyNode]:
     """Dispatcher: format -> parse function.
 
     source_format is the `format` field from sources.json:
-    clash | singbox | v2ray | (auto/raw fallback: regex on raw text).
+    clash | singbox | v2ray | vpnsuper | (auto/raw fallback: regex on raw text).
     """
     fmt = (source_format or "").lower()
     if fmt in ("clash", "clash.yaml", "yaml"):
@@ -476,6 +476,21 @@ def parse_raw(source_format: str, text: str) -> list[ProxyNode]:
         return parse_singbox_json(text)
     if fmt in ("v2ray", "v2ray-base64", "base64"):
         return parse_v2ray_base64(text)
+    if fmt == "vpnsuper":
+        # vpnsuper raw is a newline-separated list of trojan:// URIs (already
+        # built by vpnsuper_feed from the decrypted server lists). Same regex
+        # extraction as the raw fallback, but explicit so it doesn't waste a
+        # base64-decode pass.
+        out: list[ProxyNode] = []
+        seen: set[str] = set()
+        for uri in extract_uris(text):
+            if uri in seen:
+                continue
+            seen.add(uri)
+            n = parse_uri(uri)
+            if n:
+                out.append(n)
+        return out
     # raw / unknown -> regex on text
     out = []
     seen = set()
