@@ -1,6 +1,88 @@
--------------------------------- verify (stub) --------------------------------
+------------------- verify (Tier1 latency + Tier2 download) -------------------
 clash-speedtest found at C:\Users\win10\go\bin\clash-speedtest.EXE
-batch 0-50 timed out (220s) — partial
-batch 0-50/3677 done, results=0
-batch 50-100/3677 done, results=9
-batch 100-150/3677 done, results=9
+------------------- Tier 1 — latency screening (fast mode) --------------------
+T1 batch 0-50/3361 done, alive=0
+T1 batch 50-100/3361 done, alive=0
+T1 batch 100-150/3361 done, alive=0
+T1 batch 150-200/3361 done, alive=0
+T1 batch 200-250/3361 done, alive=0
+T1 batch 250-300/3361 done, alive=0
+T1 batch 300-350/3361 done, alive=0
+T1 batch 350-400/3361 done, alive=0
+T1 batch 400-450/3361 done, alive=0
+T1 batch 450-500/3361 done, alive=0
+T1 batch 500-550/3361 done, alive=0
+T1 batch 550-600/3361 done, alive=1
+T1 batch 600-650/3361 done, alive=1
+T1 batch 650-700/3361 done, alive=1
+T1 batch 700-750/3361 done, alive=1
+T1 batch 750-800/3361 done, alive=1
+T1 batch 800-850/3361 done, alive=1
+T1 batch 850-900/3361 done, alive=1
+T1 batch 900-950/3361 done, alive=1
+T1 batch 950-1000/3361 done, alive=1
+T1 batch 1000-1050/3361 done, alive=1
+T1 batch 1050-1100 timed out (220s) — partial
+T1 batch 1050-1100/3361 done, alive=1
+T1 batch 1100-1150/3361 done, alive=1
+T1 batch 1150-1200/3361 done, alive=1
+T1 batch 1200-1250/3361 done, alive=1
+T1 batch 1250-1300/3361 done, alive=1
+T1 batch 1300-1350/3361 done, alive=1
+T1 batch 1350-1400/3361 done, alive=1
+T1 batch 1400-1450/3361 done, alive=1
+T1 batch 1450-1500/3361 done, alive=1
+T1 batch 1500-1550/3361 done, alive=1
+T1 batch 1550-1600/3361 done, alive=1
+T1 batch 1600-1650/3361 done, alive=1
+T1 batch 1650-1700/3361 done, alive=1
+T1 batch 1700-1750/3361 done, alive=1
+T1 batch 1750-1800/3361 done, alive=1
+T1 batch 1800-1850/3361 done, alive=1
+T1 batch 1850-1900/3361 done, alive=1
+T1 batch 1900-1950/3361 done, alive=1
+T1 batch 1950-2000/3361 done, alive=1
+T1 batch 2000-2050/3361 done, alive=1
+T1 batch 2050-2100/3361 done, alive=1
+T1 batch 2100-2150/3361 done, alive=1
+T1 batch 2150-2200/3361 done, alive=1
+T1 batch 2200-2250/3361 done, alive=1
+T1 batch 2250-2300/3361 done, alive=1
+T1 batch 2300-2350/3361 done, alive=1
+T1 batch 2350-2400/3361 done, alive=1
+T1 batch 2400-2450/3361 done, alive=1
+T1 batch 2450-2500/3361 done, alive=1
+T1 batch 2500-2550/3361 done, alive=1
+T1 batch 2550-2600/3361 done, alive=1
+T1 batch 2600-2650/3361 done, alive=1
+T1 batch 2650-2700/3361 done, alive=1
+T1 batch 2700-2750/3361 done, alive=1
+T1 batch 2750-2800/3361 done, alive=1
+T1 batch 2800-2850/3361 done, alive=1
+T1 batch 2850-2900/3361 done, alive=1
+T1 batch 2900-2950/3361 done, alive=1
+T1 batch 2950-3000/3361 done, alive=1
+T1 batch 3000-3050/3361 done, alive=1
+T1 batch 3050-3100/3361 done, alive=1
+T1 batch 3100-3150/3361 done, alive=1
+T1 batch 3150-3200/3361 done, alive=1
+T1 batch 3200-3250/3361 done, alive=1
+T1 batch 3250-3300/3361 done, alive=1
+T1 batch 3300-3350/3361 done, alive=1
+T1 batch 3350-3361/3361 done, alive=1
+Tier 1 alive: 1
+WARNING: 77 Tier-1 speedtest rows could not be matched to a host:port — verify 
+clash-speedtest output format / name mapping
+---------------- Tier 2 — download speed test (download mode) -----------------
+T2 batch 0-1/1 done, passed=1
+Tier 2 passed (>= 5.0 MB/s): 1
+     verify summary     
++----------------------+
+| metric       | value |
+|--------------+-------|
+| tier1_alive  | 1     |
+| tier2_tested | 1     |
+| tier2_passed | 1     |
+| total_alive  | 3     |
+| unverified   | 0     |
++----------------------+

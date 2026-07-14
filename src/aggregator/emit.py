@@ -148,7 +148,15 @@ def to_clash_dict(n: ProxyNode) -> dict:
     if n.fp:
         d["client-fingerprint"] = n.fp
     if n.alpn:
-        d["alpn"] = n.alpn
+        # mihomo requires alpn to be a list (slice); source may store it as a
+        # comma-separated string or single value. Normalize to list.
+        alpn = n.alpn
+        if isinstance(alpn, str):
+            d["alpn"] = [a.strip() for a in alpn.split(",") if a.strip()]
+        elif isinstance(alpn, list):
+            d["alpn"] = alpn
+        else:
+            d["alpn"] = [str(alpn)]
     if n.pbk:
         d.setdefault("reality-opts", {})["public-key"] = n.pbk
     if n.sid:
