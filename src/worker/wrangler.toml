@@ -1,0 +1,26 @@
+name = "proxy-sub-aggregator"
+main = "sub-aggregator.ts"
+compatibility_date = "2025-01-01"
+
+# D1 binding — create DB before deploy:
+#   npx wrangler d1 create nodes-db
+# then paste the returned database_id below (replace placeholder).
+[[d1_databases]]
+binding = "DB"
+database_name = "nodes-db"
+database_id = "1b837756-1913-43e7-b727-2d5a23bb8a78"
+
+# KV binding — create namespace before deploy:
+#   npx wrangler kv namespace create CACHE
+# then paste the returned id below (replace placeholder).
+[[kv_namespaces]]
+binding = "CACHE"
+id = "a8cc252082fc4736b5e9ce897cd33f37"
+
+# Cron trigger — every 2 hours
+[triggers]
+crons = ["0 */2 * * *"]
+
+# Before first deploy you must also:
+#   npx wrangler secret put ADMIN_TOKEN   # sets the admin import token
+#   npx wrangler d1 execute nodes-db --file=infra/d1/schema.sql   # create tables

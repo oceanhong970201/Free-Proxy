@@ -1,0 +1,38 @@
+# Self-owned VPS node pool (Stage 15 — A7).
+#
+# Fill in your OWN legitimately-rented VPS instances (Cloudzy/Hetzner/Vultr),
+# each running your own mihomo/xray. These are the highest-quality, most-stable
+# nodes mixed into the subscription. Leave `nodes: []` to publish an empty pool.
+#
+# Fields map 1:1 onto ProxyNode (see src/aggregator/models.py); node_to_uri
+# (src/aggregator/parser.py) rebuilds the canonical URI from these fields, so
+# only fields the protocol actually uses need to be set.
+#
+# Supported proto values: vless | vmess | trojan | ss | tuic | hysteria2
+#
+# vless example (with REALITY/xtls-rprx-vision flow over ws+TLS):
+nodes:
+  - proto: vless
+    host: your-vps.example.com
+    port: 443
+    uuid: 00000000-0000-0000-0000-000000000000
+    sni: your-vps.example.com
+    net: ws
+    path: /vless
+    flow: xtls-rprx-vision
+    name: self-vless-01
+  - proto: vmess
+    host: another-vps.com
+    port: 443
+    uuid: 11111111-1111-1111-1111-111111111111
+    net: ws
+    path: /vmess
+    tls: true
+    sni: another-vps.com
+    name: self-vmess-01
+  - proto: trojan
+    host: trojan-vps.example.com
+    port: 443
+    password: your-trojan-password
+    sni: trojan-vps.example.com
+    name: self-trojan-01

@@ -1,0 +1,28 @@
+# Stage 17 — A2 V2Board/Xboard recon targets.
+#
+# ONLY list self-owned / authorized panels under `targets`. Wild panels are
+# recon-only (fingerprinted from recon_intel.jsonl) and NEVER exploited.
+#
+# Each target entry:
+#   host: panel domain or IP (no scheme)
+#   port: 443 / 7001 / 80 ... (default 443 if omitted)
+#   email: account email to target with the magic-link chain (default
+#          default_email below). For Xboard installs the official docs suggest
+#          admin@demo.com — but ONLY use an email you own / are authorized to
+#          use on a self-owned panel.
+#   scheme: http | https (default https for 443/8443/etc, else http)
+
+targets: []  # human-filled: self-owned / authorized panels
+
+# Pull wild recon candidates from state/recon_intel.jsonl (produced by
+# ct_recon / gray_sources). These are ONLY fingerprinted, never exploited.
+recon_from_intel: true
+
+# Default email used when a target omits `email`. Only meaningful for exploit
+# mode against self-owned panels.
+default_email: admin@demo.com
+
+# Network behavior
+request_timeout_seconds: 15.0
+verify_tls: false          # many panels use self-signed certs
+rate_limit_seconds: 1.0   # per-request politeness

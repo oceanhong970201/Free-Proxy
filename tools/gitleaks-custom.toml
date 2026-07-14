@@ -1,0 +1,19 @@
+title = "proxy-secret-custom"
+
+[[rules]]
+id = "vmess-uuid"
+description = "vmess/vless UUID"
+regex = '''[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'''
+tags = ["proxy", "uuid"]
+
+[[rules]]
+id = "subscribe-token"
+description = "subscribe?token= or sub URL token"
+regex = '''subscribe\?token=[A-Za-z0-9]{16,}'''
+tags = ["proxy", "token"]
+
+[[rules]]
+id = "v2board-app-key"
+description = "V2Board/Xboard APP_KEY base64"
+regex = '''APP_KEY=base64:[A-Za-z0-9+/=]{40,}'''
+tags = ["proxy", "appkey"]

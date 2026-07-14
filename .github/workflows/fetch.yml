@@ -1,0 +1,64 @@
+name: fetch-and-publish
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  aggregate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: aggregate
+      cancel-in-progress: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Fetch + Parse + Emit
+        run: python src/aggregator/cli.py fetch && python src/aggregator/cli.py parse && python src/aggregator/cli.py emit
+        env:
+          TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
+          TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
+          TELEGRAM_SESSION_STRING: ${{ secrets.TELEGRAM_SESSION_STRING }}
+
+      - name: Publish alive nodes to Worker
+        run: python src/aggregator/cli.py publish
+        env:
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+          WORKER_URL: ${{ secrets.WORKER_URL }}
+
+      - name: Commit artifacts
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add output/ state/last-run.json
+          git diff --staged --quiet || git commit -m "auto update $(date -u +'%Y-%m-%d %H:%M')"
+          git push
+
+      - name: Deploy to Cloudflare Pages
+        uses: cloudflare/pages-action@v1
+        with:
+          apiToken: ${{ secrets.CF_API_TOKEN }}
+          accountId: ${{ secrets.CF_ACCOUNT_ID }}
+          projectName: ${{ secrets.CF_PROJECT_NAME }}
+          directory: output
+
+      - name: Purge jsDelivr CDN
+        continue-on-error: true
+        run: |
+          for f in clash.yaml singbox.json v2ray-base64.txt; do
+            curl -sX PURGE "https://cdn.jsdelivr.net/gh/${{ github.repository }}@${{ github.ref_name }}/output/$f" || true
+          done

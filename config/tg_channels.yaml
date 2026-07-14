@@ -1,0 +1,33 @@
+# Stage 18 — A5 Telegram underground market recon channels.
+#
+# web_preview mode (default, no login): scrapes https://t.me/s/<channel> which
+# is the public static mirror. No api_id / api_hash / session needed.
+#
+# mtproto mode (off by default): needs TELEGRAM_API_ID / TELEGRAM_API_HASH /
+# TELEGRAM_SESSION_STRING env vars. Reserved for future telethon integration;
+# not implemented in this skeleton.
+
+channels:
+  - jichangtj
+  - buliang00
+  - ccbaohe
+  - ShareCentrePro
+  - kjgxZY
+  - dns68
+
+web_preview: true
+mtproto: false
+
+telegram_api_id: ${TELEGRAM_API_ID}
+telegram_api_hash: ${TELEGRAM_API_HASH}
+telegram_session: ${TELEGRAM_SESSION_STRING}
+
+# Scrape behavior
+max_pages_per_channel: 20      # ?before=<mid> pagination cap
+request_timeout_seconds: 15.0
+rate_limit_seconds: 1.0       # between page fetches
+verify_tls: true
+
+# Triage knobs (see honeytrap_triage)
+ttl_resample_hours: 24        # nodes older than this w/ no rotation = suspect
+single_channel_push_threshold: 3  # >= N posts from one channel pushing same host = suspect

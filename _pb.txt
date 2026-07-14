@@ -1,0 +1,101 @@
+PART B — 整合進現有項目
+
+### B1. 每個管道接進 state/gray_nodes.jsonl（G1/G2/G3 架構）
+
+| 管道 | G1（raw ingest） | G2（normalize/dedup） | G3（verify/publish） |
+|---|---|---|---|
+| A1 cracked sub | `curl sub URL` → parse YAML/base64 | dedup `addr:port:password` hash | 6h re-pull；watermark flag；alive/latency |
+| A2 V2Board chain | getSubscribe dump → per-user sub list | 同上 + source=`v2board-cve-2026-39912` | T1 latency + T2 download；**enabled:false 預設** |
+| A3 subconverter | 後端 cache dump | dedup | verify；標「未經授權來源」 |
+| A4 GitHub dork | `gh api search/code` + `git log -p` | regex extract token → fetch sub | TTL poll；標 `github-leak` |
+| A5 TG market | telethon `iter_messages` + web-preview | 節點 URI decode（vmess base64 JSON） | provenance graph（forward_from）；蜜罐 triage §7 |
+| A6 darkweb | **不 ingest**（純 recon） | — | 拓樸情報另存 `state/darkweb_ioc.jsonl` |
+| A7 memdump | 本機/自有 client config + controller `/configs?format=yaml` | jq walk outbounds | self-owned nodes enabled:true |
+| A8 CT+pDNS | crt.sh + SecurityTrails | panel fingerprint | 餵 A2 recon 前級 |
+
+G1 寫 `gray_nodes.jsonl`，G2 dedup 後寫 `staging.jsonl`，G3 寫 `live.jsonl` + `nodes.db`（`alive`/`latency_ms` 欄位——**注意：subconverter-ssrf DIM 揭露目前 verify run 未持久化 liveness，DB 3823 rows 全 NULL，需修 verifier 寫入 alive/latency 再 publish**）。
+
+### B2. 新增 PRD 階段（標「深灰/黑」+ enabled:false 預設）
+
+- `gray_nodes.jsonl` 每筆加欄位：`tier: "deep-gray"|"black"`、`source_channel: A1..A8`、`legal_risk: high|critical`、`enabled: false`（預設）、`watermark_suspect: bool`、`provenance: {forward_chain, first_seen_ts, ct_domain}`。
+- 新增 PRD 階段 `recon-only`：A4/A6/A8 僅寫 `state/recon_intel.jsonl`，不進 staging、不進 publish pipeline。
+- A2/A5 預設 `enabled:false`，需人工 triage §7 蜜罐檢查後手動 `enabled:true` 才進 verify。
+- A7 self-owned 子集（自有 VPS root SSH 合法租用）獨立 `self_nodes.jsonl`，`enabled:true`。
+
+### B3. 需要的工具/套件/API key
+
+| 類別 | 工具 |
+|---|---|
+| V2Board chain | `curl`+`jq`、PoC `github.com/Chocapikk/CVE-2026-39912`、ffuf（secure_path brute） |
+| Subconverter | `sub.v1.mk` 後端清單、urlclash-converter（本機） |
+| GitHub dork | `gh` CLI + `GITHUB_TOKEN`、`trufflehog github --org=`、`gitleaks dir`（非 `detect --source`） |
+| TG market | `telethon` + `api_id`/`api_hash`（my.telegram.org）、rotating residential MTProxy、TGStat/Telemetr、Apify TG scraper |
+| Darkweb recon | Ahmia、IntelligenceX、DarkOwl/Flare/SOCRadar（商業）、Bitsight TRACE、Spur |
+| Memdump | `gcore`/`gdb`、ProcDump(`-ma`)、strings.exe、`jq`、`apktool`+`jadx`、`npx asar extract`、`dnSpy`/`ilspycmd`、frida+objection、mitmproxy |
+| CT/pDNS | `crt.sh`、SecurityTrails API key、DNSDB、VirusTotal |
+| Verify | clash-speedtest（`C:\Users\win10\go\bin\clash-speedtest.EXE`，需修 verifier 寫入 alive/latency） |
+
+### B4. 操作層風險（非道德：法律/被反制/蜜罐識別）
+
+| 風險類 | 管道 | 機制 |
+|---|---|---|
+| **刑事（CFAA/Computer Misuse）** | A2/A5/A6/A7(他人) | 未授權存取他人系統/使用 botnet exit；911 S5 客戶納入 conspiracy；19天→ransomware 查扣客戶 DB |
+| **被反制 DDoS** | A6 | Aisuru 30 Tbps；botnet 營運者報復 |
+| **蜜罐識別** | A1/A2/A5 | per-account watermark token → 比對 cracked-pack → 封號清流量；機場自有「洩漏 sub」頻道撒餌 |
+| **C2 端 MITM** | A6/A5(infostealer) | botnet 營運者控制 relay，明文憑證盡失；cracked client phone-home + infostealer（PROXYLIB/SantaStealer/Phantom Shuttle/LTX） |
+| **IP 信譽焦土** | A6 | exit IP 在 Spur/Satori/Synthient 全 blocklist |
+| **查扣/蜜罐論壇** | A5/A6 | XSS→傳 SBU honeypot；BreachForums 反覆查扣；TG 帳號 mass-join 觸發 anti-spam 永封 |
+| **token 撤銷 vs 節點參數解耦** | A1/A3 | sub URL 可撤銷但節點 UUID/password 直到營運端另重置 node key 才失效——多數營運僅重置 sub URL |
+| **閱後即焚** | A1 | 首次 GET 回節點後續回空；需立即本機快取 + 6h re-pull |
+
+---
+
+## PART C — 優先級（yield / risk / feasibility 排序）
+
+| 排序 | 管道 | yield | risk | feasibility | 判定 |
+|---|---|---|---|---|---|
+| 1 | A7 self-owned 子集 | 中 | 低（合法租用 VPS） | 高 | **實作** |
+| 2 | A8 CT+pDNS | 高（拓樸） | 低（純被動） | 高 | **實作（recon）** |
+| 3 | A4 GitHub dork | 中 | 中（CFAA if used） | 高 | **recon + 自有 org 稽核**，不 exploit 第三方 token |
+| 4 | A1 cracked sub 快取 | 中 | 中（watermark/撤銷） | 中 | **recon + 本機快取技術**，不主動 A2 |
+| 5 | A3 subconverter recon | 中 | 中（公共後端 RCE 法律灰） | 中 | **recon 後端清單**，不偷 cache |
+| 6 | A5 TG market recon | 高 | 中（帳號封/infostealer） | 中 | **recon web-preview + 蜜罐 triage**，不付費進 VIP |
+| 7 | A2 V2Board chain | 極高 | 極高（CFAA/查扣） | 高（PoC 現成） | **只 recon fingerprint（admin/config/fetch oracle）不 exploit** |
+| 8 | A6 darkweb | 極高（體量） | catastrophic | 低（論壇 whack-a-mole） | **只 recon 被動 OSINT**，永不採購/使用 |
+
+---
+
+## 實作清單（實際寫入 pipeline）
+
+1. **A7 self-owned nodes**：合法租用 VPS（Cloudzy V2Ray-VPS 模式），自架 mihomo + 自有節點 → `self_nodes.jsonl`，`enabled:true`，G1→G2→G3 完整流程。修 verifier 寫入 `alive`/`latency_ms` 進 `nodes.db`（當前 verify run 全 NULL，見 subconverter-ssrf DIM 驗證）。
+2. **A8 CT+pDNS recon**：`crt.sh` + SecurityTrails 定期掃 → `state/recon_intel.jsonl`，產 panel fingerprint 餵 A2 recon 前級。
+3. **A4 自有 org 稽核**：`trufflehog github --org=<your-org>` + `gitleaks dir <path>`（**修正：非 `detect --source`**），自訂 regex 覆蓋 `subscribe?token=`、vmess/vless UUID、V2Board APP_KEY；pre-commit hook + CI。
+4. **A1 本機快取技術**：對任何合法取得之 sub URL，立即 `curl` 一次存本機 + urlclash-converter 本機轉換，6h re-pull 機制對抗閱後即焚/輪替。
+5. **A5 TG web-preview recon**：`t.me/s/<channel>` curl+BeautifulSoup 列舉公共聚合頻道，regex 抓 URI/網盤/subconverter 連結 → `gray_nodes.jsonl`（`tier:"deep-gray"`,`enabled:false`），蜜罐 triage §7 七點檢查後才手動 enable。
+
+---
+
+## 只 recon 不 exploit 清單
+
+1. **A2 V2Board chain**：`/api/v1/admin/config/fetch` 403 oracle + `/api/v1/guest/comm/config` fingerprint 確認 panel 型別與版本；**不發 magic-link 請求、不 dump getSubscribe**。CVE-2026-39912 PoC 僅作威脅理解，不對非自有 panel 執行。
+2. **A6 darkweb 全域**：Ahmia/IntelX/DarkOwl/Flare/SOCRadar/Intel 471/Bitsight/Spur/Infoblox 被動監控 + LE 新聞稿 + 洩漏 forum-DB 分析 → `state/darkweb_ioc.jsonl`。**永不註冊市場、永不採購、永不 .onion 瀏覽非法商品、永不使用 botnet exit node**。
+3. **A3 subconverter**：`GET /version` 列舉公共後端版本與已知漏洞狀態；**不 path-traversal、不讀 cache、不 dump 他人轉換紀錄**。
+4. **A5 TG VIP 付費層**：不付 USDT 進 vending bot、不進私頻道取 fresh sub；僅 web-preview 公共層 + telethon forward provenance graph。
+5. **A7 他人機器**：memdump/controller/keychain 僅用於**自有/授權**機器；掃描 Shodan 無驗 Clash controller 僅作 IoC 統計，不連線使用。
+6. **A4 第三方 token**：GitHub code search 命中第三方 `subscribe?token=` → notify repo owner / provider abuse takedown，**不 fetch raw、不 dedup 進可用 corpus、不保留 token 值**。
+
+---
+
+**關鍵來源索引**
+- CVE-2026-39912：`nvd.nist.gov/vuln/detail/CVE-2026-39912`、`github.com/advisories/GHSA-83h9-46h8-whf4`、`chocapikk.com/posts/2026/xboard-v2board-account-takeover`、`github.com/Chocapikk/CVE-2026-39912`
+- CVE-2026-37504：`nvd.nist.gov/vuln/detail/CVE-2026-37504`（CVSS NIST 7.5 / MITRE 5.3；**主源改用 NVD，原 SentinelOne 頁帶 AI 生成免責**）
+- V2Board 1.6.1 privesc：`github.com/vulhub/vulhub/blob/master/v2board/1.6-privilege-escalation/README.md`
+- admin/config/fetch PoC：`medium.com/@sshui/writing-a-poc-for-the-v2board-authorization-vulnerability-2d823d69d052`（prime cache 含 `/api/v1/user/getStat` + `/api/v1/user/info`）
+- Subconverter RCE/cache：`bulianglin.com/archives/psub.html`、`youtube.com/watch?v=FclVhxp1g0Y`、`v2ex.com/t/1179441`
+- GitHub 稽核：`github.com/trufflesecurity/trufflehog`、`github.com/gitleaks/gitleaks`（`gitleaks dir`）、`github.com/ermaozi/get_subscribe`、`github.com/sun9426/sun9426.github.io`
+- TG market：`t.me/s/jichangtj`、`t.me/s/buliang00`、`tgstat.ru/en/search`、`telemetr.io`、`github.com/uxummax/access_telebot`、`github.com/AZeC4/TelegramGroup`、`github.com/lonamiwebs/telethon`、`github.com/siiway/urlclash-converter`
+- Darkweb/botnet：`bitsight.com/blog/residential-proxy-services-malware-ecosystems`、`cloud.google.com/blog/topics/threat-intelligence/disrupting-largest-residential-proxy-network`、`krebsonsecurity.com/2025/10/aisuru-botnet-shifts-from-ddos-to-residential-proxies`、`helpnetsecurity.com/2025/05/12/law-enforcement-takes-down-proxy-botnets-5socks-anyproxy-used-by-criminals`、`intel471.com/blog/a-look-at-the-residential-proxy-market`、`databreaches.net/2026/06/30/the-fall-of-xss-forum-from-damagelab-to-the-2025-takedown`、`rapid7.com` 2026 Threat Landscape
+- Memdump/client：`wiki.metacubex.one/api/`、`github.com/2dust/v2rayN`、`sing-box.sagernet.org/configuration/outbound/`、`learn.microsoft.com/sysinternals/downloads/procdump`、`github.com/microsoft/ProcDump-for-Linux`
+- CT/pDNS：`crt.sh`、`securitytrails.com`、`dnsdb.info`
+
+**驗證修正摘要**：(1) CVE-2026-37504 主源 Senti

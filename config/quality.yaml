@@ -1,0 +1,8 @@
+# Quality screening config for two-tier verify + publish.
+# Consumed by src/aggregator/cli.py (_verify_logic + _publish_logic).
+max_latency_ms: 1000          # Tier 1 latency cutoff (ms) — nodes above this are dead
+min_download_speed_mbps: 5     # Tier 2 download speed floor (MB/s) — below this is dropped
+top_n_publish: 100             # publish: top-N alive nodes by download_speed to POST to Worker
+tier1_concurrent: 50           # clash-speedtest -concurrent for Tier 1 (fast mode)
+tier2_concurrent: 10           # clash-speedtest -concurrent for Tier 2 (download mode)
+download_size_bytes: 10485760  # 10 MB download per node for Tier 2 speed test

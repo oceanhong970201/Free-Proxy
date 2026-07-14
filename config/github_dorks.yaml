@@ -1,0 +1,14 @@
+# GitHub code search dorks（REST /search/code，需 GITHUB_TOKEN，10/min code_search bucket）
+dorks:
+  - 'subscribe?token= extension:yaml'
+  - 'vmess:// extension:yaml'
+  - 'getSubscribe extension:yaml'
+  - 'APP_KEY base64:PZXk extension:env'
+  - '"api/v1/user/getSubscribe" extension:yaml'
+  - 'vless:// extension:txt'
+
+# 自有 org 稽核（trufflehog/gitleaks）。空字串 = 不跑自有 org 稽核。
+self_org: ""
+
+# 第三方 token 命中處理：notify + takedown，不 fetch raw
+fetch_third_party_raw: false

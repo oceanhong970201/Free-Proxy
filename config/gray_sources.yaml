@@ -1,0 +1,54 @@
+# Gray pipeline config — Shodan/FOFA/Quake panel recon + open-register harvest.
+# Consumed by src/aggregator/gray_sources.py.
+# API keys/credentials are read from environment variables — never hardcoded.
+# ${VAR} tokens are expanded at load time; a missing var resolves to empty
+# string and that pipeline is skipped with a log line.
+
+# ---- API credentials (env) ----
+shodan_api_key: ${SHODAN_API_KEY}
+fofa_email: ${FOFA_EMAIL}
+fofa_key: ${FOFA_KEY}
+quake_key: ${QUAKE_KEY}
+
+# ---- Fingerprint queries ----
+shodan_queries:
+  - 'http.html:"V2Board"'
+  - 'http.title:"V2Board"'
+  - 'http.html:"/api/v1/guest/comm/config"'
+  - 'ssl.cert.subject.CN:"*.workers.dev" port:443,2053,2083,2087,2096,8443'
+
+fofa_queries:
+  - 'app="V2Board"'
+  - 'app="Xboard"'
+  - 'body="/api/v1/guest/comm/config"'
+  - 'cert="www.microsoft.com" && port="443" && asn!="13335"'
+
+quake_queries:
+  - 'app:"V2Board"'
+  - 'app:"Xboard"'
+  - 'app:"sing-box"'
+
+# ---- Open-register panel harvest ----
+panel_register:
+  default_email: gray@protonmail.com
+  default_password: ${PANEL_PASSWORD}
+  # V2Board/Xboard register endpoint
+  register_path: /api/v1/passport/auth/register
+  # After register, fetch the trial subscribe URL (contains token)
+  sub_path: /api/v1/user/getSubscribe
+
+# ---- Rate limiting (per API) ----
+rate_limit_seconds: 1.0   # Shodan/FOFA/Quake: 1 req/s politeness
+request_timeout_seconds: 15.0
+# Many panels use self-signed certs — verify=False
+verify_tls: false
+# Max panels to attempt registration against per run (cap blast radius)
+max_panel_attempts: 50
+
+# ---- Public scanning (off by default, needs dedicated research VPS) ----
+scan:
+  enabled: false
+  ports_tcp: [8388, 443, 8080, 2052, 2083, 2087, 2096, 8443, 7001]
+  ports_udp: [443, 36712, 51820]
+  rate: 10000
+  # Only produces leads; no active probing of services with leaked creds.

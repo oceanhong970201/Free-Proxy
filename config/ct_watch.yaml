@@ -1,0 +1,19 @@
+# CT logs + passive DNS recon watch list (Stage 16 — A8).
+#
+# `watch_domains` are airport/proxy-backend domains to passively enumerate via
+# Certificate Transparency (crt.sh, no key required) and SecurityTrails
+# historical A records (optional, needs SECURITYTRAILS_API_KEY env var).
+# `workers.dev` is included by default to surface self-hosted CF Worker pools.
+#
+# This is PASSIVE recon only — no active probing of targets. Output feeds
+# Stage 17 (V2Board/Xboard fingerprint) as a lead source.
+watch_domains:
+  - example.com  # human: fill in airport domains here
+  - workers.dev
+
+# crt.sh parallel query concurrency (one HTTP request per watch_domain).
+crtsh_concurrency: 5
+
+# Optional. If unset, SecurityTrails queries are skipped (no crash).
+# Set via env: $env:SECURITYTRAILS_API_KEY = "..."
+securitytrails_api_key: ${SECURITYTRAILS_API_KEY}

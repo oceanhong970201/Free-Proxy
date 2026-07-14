@@ -1,0 +1,52 @@
+# env / secrets
+.env
+.env.*
+!.env.example
+
+# sqlite
+nodes.db
+nodes.db-journal
+nodes.db-wal
+nodes.db-shm
+
+# staging / live line files (runtime artifacts)
+state/*.jsonl
+state/run-*.log
+
+# output — keep generated subscriptions tracked, but allow local regen
+# (uncomment the next line if you prefer to gitignore output/)
+# output/
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# binaries / tools
+bin/
+
+# misc
+.DS_Store
+Thumbs.db
+
+# admin token temp (contains RESIN/Worker secret)
+.admin_token.tmp
+
+
+# node
+node_modules/
+**/node_modules/
+
+# python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# worker build artifacts
+src/worker/.wrangler/
+src/worker/.output/
+dist/
+

@@ -1,0 +1,76 @@
+name: verify-daily
+
+# Daily full two-tier verify (latency + download speed) on GitHub Actions runner.
+# Single job — 3677 nodes takes ~4h (< 6h job limit). Runs once daily at 05:00 UTC.
+# fetch-and-publish workflow handles fetch/parse/emit/publish every 30min; this
+# only refreshes alive/latency/download_speed, then re-publishes alive nodes.
+
+on:
+  schedule:
+    - cron: '17 5 * * *'   # daily ~05:17 UTC (off-round-minute)
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: verify-daily
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300   # 5h cap (< 6h Actions limit, covers ~4h full verify)
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'   # 1.26 doesn't exist yet as stable; 1.22 is safe
+
+      - name: Install clash-speedtest
+        run: go install github.com/faceair/clash-speedtest@latest
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Fetch + parse (refresh nodes before verify)
+        run: |
+          python src/aggregator/cli.py fetch
+          python src/aggregator/cli.py parse
+          python src/aggregator/cli.py emit
+
+      - name: Two-tier verify (latency + download speed)
+        run: python src/aggregator/cli.py verify
+        env:
+          HOME: ${{ github.workspace }}   # so GOPATH/bin is on PATH for clash-speedtest
+        continue-on-error: true   # partial results still publishable
+
+      - name: Re-emit with alive-only + download_speed sort
+        run: python src/aggregator/cli.py emit
+
+      - name: Publish top-N alive nodes to Worker
+        run: python src/aggregator/cli.py publish
+        env:
+          WORKER_URL: ${{ secrets.WORKER_URL }}
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+
+      - name: Commit updated state + output
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add output/ state/last-run.json state/live.jsonl 2>/dev/null || true
+          git diff --staged --quiet || git commit -m "daily verify $(date -u +'%Y-%m-%d %H:%M')"
+          git push
+        continue-on-error: true   # commit failure is non-fatal
+
+      - name: Purge jsDelivr CDN (if published via raw)
+        run: |
+          for f in clash.yaml singbox.json v2ray-base64.txt feed.xml; do
+            curl -sX PURGE "https://cdn.jsdelivr.net/gh/${{github.repository}}@${{github.ref_name}}/output/$f" || true
+          done
+        continue-on-error: true

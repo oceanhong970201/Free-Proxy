@@ -1,0 +1,11 @@
+# sample fixture subscription for offline parse/emit testing.
+# mix of vmess (base64-json), vless, trojan, ss, hysteria2 URIs.
+
+vmess://eyJ2IjoiMiIsInBzIjoidGVzdC12bWVzcy0xIiwiYWRkIjoiZXhhbXBsZS5jb20iLCJwb3J0IjoiNDQzIiwiaWQiOiI5YjM0ZjU1ZC0wYTljLTRkOGMtOTQyYi0xMjM0NTY3ODkwYWIiLCJhaWQiOiIwIiwibmV0Ijoid3MiLCJ0eXBlIjoibm9uZSIsImhvc3QiOiJleGFtcGxlLmNvbSIsInBhdGgiOiIvcGF0aDEiLCJzbmkiOiJleGFtcGxlLmNvbSIsInRscyI6InRscyJ9
+vless://01234567-89ab-cdef-0123-456789abcdef@example.com:443?encryption=none&security=tls&sni=example.com&type=ws&host=example.com&path=%2Fvlesspath#test-vless-1
+trojan://trojanpassword@example.com:443?security=tls&sni=example.com&type=tcp#test-trojan-1
+ss://YWVzLTIyNDpkZW1vcGFzc3dvcmQ@ss.example.com:8388#test-ss-1
+hysteria2://hypassword@hy.example.com:443?sni=hy.example.com&alpn=h3#test-hy2-1
+
+vmess://eyJ2IjoiMiIsInBzIjoidGVzdC12bWVzcy0yIiwiYWRkIjoiYjIuZXhhbXBsZS5jb20iLCJwb3J0IjoiODAiLCJpZCI6ImFiY2QxMjM0LWFiY2QtMTIzNC1hYmNkLTEyMzQ1Njc4OWFiYyIsImFpZCI6IjAiLCJuZXQiOiJ0Y3AiLCJ0eXBlIjoibm9uZSIsImhvc3QiOiJiMi5leGFtcGxlLmNvbSJ9
+vless://abcdef01-2345-6789-abcd-ef0123456789@cdn.example.com:2053?security=tls&type=grpc&sni=cdn.example.com#test-vless-2

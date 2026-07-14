@@ -1,0 +1,51 @@
+name: health-check
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  health:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Ping Worker /health
+        id: ping
+        run: |
+          set +e
+          code=$(curl -s -o /tmp/health.json -w "%{http_code}" --max-time 30 \
+            "${{ vars.WORKER_BASE_URL || 'https://proxy-sub-aggregator.proxy-aggregator.workers.dev' }}/health")
+          echo "http_code=$code" >> "$GITHUB_OUTPUT"
+          cat /tmp/health.json || true
+          if [ "$code" != "200" ]; then
+            echo "healthy=false" >> "$GITHUB_OUTPUT"
+            exit 1
+          else
+            echo "healthy=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open issue on failure
+        if: failure()
+        uses: actions/github-script@v7
+        env:
+          HTTP_CODE: ${{ steps.ping.outputs.http_code }}
+          WORKER_URL: ${{ vars.WORKER_BASE_URL || 'https://proxy-sub-aggregator.proxy-aggregator.workers.dev' }}
+        with:
+          script: |
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `Health check failed (${new Date().toISOString()})`,
+              body: [
+                `Worker \`${process.env.WORKER_URL}/health\` returned HTTP \`${process.env.HTTP_CODE}\`.`,
+                `Run: ${runUrl}`,
+                `@${context.actor}`
+              ].join('\n\n'),
+              labels: ['health-check', 'ops']
+            });
