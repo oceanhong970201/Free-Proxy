@@ -596,13 +596,13 @@ def _verify_logic() -> dict:
     return summary
 
 
-def _publish_logic() -> dict:
+def _publish_logic(strict: bool = False) -> dict:
     """Publish top-N alive nodes (by download_speed) to the Cloudflare Worker.
 
-    Reads live.jsonl, keeps alive=True with download_speed >= min_download_speed_mbps,
-    sorts by download_speed desc, takes top_n_publish, base64-encodes their raw
-    URIs (newline-joined), and POSTs to /admin/import with X-Admin-Token.
-    KV cache is left to expire via its 60s TTL (wrangler purge optional).
+    Non-strict (default, used by fetch.yml): publish alive=True + alive=None
+    (unverified), exclude only alive=False (dead). This keeps the Worker fresh
+    even before verify-daily runs. --strict requires alive=True + download_speed
+    >= min_download_speed_mbps, used after verify for quality filtering.
     """
     import base64 as _b64
 
@@ -629,16 +629,18 @@ def _publish_logic() -> dict:
             n = ProxyNode(**json.loads(line))
         except Exception:
             continue
-        # C2: keep strict — only publish alive=True nodes. Nodes with alive=None
-        # (unverified) and alive=False (dead) are excluded. Log a warning so an
-        # unverified run is visible rather than silently publishing 0 nodes.
-        if n.alive is None:
-            none_alive_count += 1
-            continue
-        if not n.alive:
+        # Publish policy: alive=True always published; alive=None (unverified)
+        # also published UNLESS --strict (so fetch.yml's no-verify run still
+        # updates the Worker with fresh nodes); alive=False (dead) always excluded.
+        if n.alive is False:
             dead_count += 1
             continue
-        if n.download_speed is None or n.download_speed < min_dl:
+        if n.alive is None:
+            none_alive_count += 1
+            if strict:
+                continue
+        # --strict: require download_speed >= min; non-strict: accept any alive/None
+        if strict and (n.download_speed is None or n.download_speed < min_dl):
             continue
         selected.append(n)
 
@@ -762,10 +764,16 @@ def emit_cmd() -> None:
 
 
 @app.command()
-def publish() -> None:
+def publish(
+    strict: bool = typer.Option(
+        False,
+        "--strict",
+        help="Only publish verified alive nodes (post-verify). Default: also publish unverified.",
+    )
+) -> None:
     """Publish top-N alive nodes (by download_speed) to the Cloudflare Worker."""
     console.rule("[bold magenta]publish")
-    summary = _publish_logic()
+    summary = _publish_logic(strict=strict)
     _print_table("publish summary", summary)
 
 
@@ -878,7 +886,7 @@ def all_cmd() -> None:
     console.print(f"  {counts['emit']}")
 
     console.print("[bold cyan]== publish ==")
-    counts["publish"] = _publish_logic()
+    counts["publish"] = _publish_logic(strict=True)
     console.print(f"  {counts['publish']}")
 
     console.print("[bold cyan]== publish-resin ==")
