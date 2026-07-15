@@ -67,7 +67,9 @@ jobs:
           # — adding them warns + can exit 1; only commit the output snapshot.
           git add output/
           git diff --staged --quiet || git commit -m "daily verify $(date -u +'%Y-%m-%d %H:%M')"
-          git push
+          # Concurrent pushes can reject our push; pull --rebase then push w/ retry.
+          git pull --rebase --autostash || true
+          git push || (sleep 5 && git pull --rebase --autostash && git push)
         continue-on-error: true   # commit failure is non-fatal
 
       - name: Purge jsDelivr CDN (if published via raw)
