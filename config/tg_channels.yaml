@@ -8,24 +8,17 @@
 # not implemented in this skeleton.
 
 channels:
-  - jichangtj
-  - buliang00
-  - ccbaohe
-  - ShareCentrePro
-  - kjgxZY
-  - dns68
-  - go4sharing
-  - dljdfx
-  - v2ray_free_conf
-  - V2RayRootFree
-  # added 2026-07-15 — verified alive via t.me/s/ web-preview (msgs present)
-  - jichang360
-  - freefq
-  - VmessProtocol
+  # Verified 2026-07-15 via t.me/s/ web-preview: these post raw proxy URIs
+  # (vmess/vless/trojan/ss) that tg-recon harvests. Ordered by URI yield.
+  - v2ray_free_conf      # 20 URIs, posts throughout the day (highest yield)
+  - V2RayRootFree        # 20 URIs
+  - VmessProtocol        # 14 URIs, multi-post/day
+  - dns68                # 9 URIs, multi-post/day
+  - ShareCentrePro       # 7 URIs
+  - dljdfx               # 5 URIs
+  # sublink channel — posts subscription URLs (not raw URIs). Kept for if
+  # tg-recon gains link-following; currently 0 harvest.
   - kxswa
-  - V2rayConfigPro
-  - dyhao6
-  - v2rayngNG
 
 web_preview: true
 mtproto: false
