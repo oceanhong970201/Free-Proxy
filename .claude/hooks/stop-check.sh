@@ -25,6 +25,20 @@ def block(reason):
     print(json.dumps({"decision": "block", "reason": reason}))
     sys.exit(0)
 
+def ci_in_flight():
+    """True if a fetch-and-publish run is queued or in_progress (refresh underway)."""
+    try:
+        out = subprocess.run(
+            ["gh", "run", "list", "--workflow=fetch-and-publish",
+             "--status=in_progress", "--limit=1", "--json=status"],
+            capture_output=True, text=True, timeout=25,
+        )
+        if out.returncode != 0 or not out.stdout.strip():
+            return False
+        return bool(json.loads(out.stdout))
+    except Exception:
+        return False
+
 def ci_fresh_age():
     """Return age (s) since latest successful fetch-and-publish CI run, or None."""
     try:
@@ -49,6 +63,9 @@ def ci_fresh_age():
         return None
 
 # 1. CI freshness (primary)
+# If a run is queued/in_progress, a refresh is underway — don't block.
+if ci_in_flight():
+    sys.exit(0)
 age = ci_fresh_age()
 if age is not None:
     if age <= THRESH:
