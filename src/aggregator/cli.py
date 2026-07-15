@@ -819,9 +819,16 @@ def _publish_logic(strict: bool = False) -> dict:
         "WORKER_URL", "https://proxy-sub-aggregator.proxy-aggregator.workers.dev"
     ).rstrip("/")
     worker_url = f"{base}/admin/import"
-    token = _os.environ.get(
-        "ADMIN_TOKEN", "JnLvqRyWopnO0yxGpgXdN8FLNdklnIiJpbhNp4lKKfU"
-    )
+    token = _os.environ.get("ADMIN_TOKEN")
+    if not token:
+        console.print(
+            "[red]ADMIN_TOKEN env not set — refusing to publish. Set it in GitHub "
+            "Secrets (CI) or .env (local). The Worker admin token must NOT be "
+            "hardcoded (repo is public)."
+        )
+        summary = {"published": 0, "error": "ADMIN_TOKEN env not set"}
+        _write_last_run(1, {"publish": summary}, extra={"last_stage_cmd": "publish"})
+        return summary
 
     try:
         resp = httpx.post(

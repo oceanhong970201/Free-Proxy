@@ -6,7 +6,7 @@
 ## 質已知的部署值（寫死，不要 placeholder）
 
 - Worker URL: `https://proxy-sub-aggregator.proxy-aggregator.workers.dev`
-- ADMIN_TOKEN: `JnLvqRyWopnO0yxGpgXdN8FLNdklnIiJpbhNp4lKKfU`（存 `.admin_token.tmp`）
+- ADMIN_TOKEN: 存 GitHub Secrets + Cloudflare Worker secret（`wrangler secret put ADMIN_TOKEN`）；已輪換，舊值失效
 - D1 database_id: `1b837756-1913-43e7-b727-2d5a23bb8a78`
 - KV id: `a8cc252082fc4736b5e9ce897cd33f37`
 - clash-speedtest binary: `C:\Users\user\project\go\bin\clash-speedtest.exe`（CI 用 ubuntu，要 `go install`）

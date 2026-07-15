@@ -5,17 +5,21 @@
 
 ---
 
-## ✅ 已填（不用動，已寫死或已部署）
+## ✅ 已部署（值存 secrets / .env，不進 repo）
 
-| Credential | 值 | 在哪 |
+> 這些 credential 不寫死在 code（repo 已 public）。值存在 GitHub Secrets（CI）或本地 .env。
+
+| Credential | 存哪 | 備註 |
 |---|---|---|
-| `RESIN_ADMIN_TOKEN` | `48941200c6727066d94e2f77a2143e4a` | resin_publisher.py fallback |
-| `RESIN_PROXY_TOKEN` | `c4bf84ee16922c1a78c359364bbfa43a12964eb6` | resin Docker env（數據面） |
-| `RESIN_URL` | `http://localhost:2260` | resin_publisher.py fallback |
-| `ADMIN_TOKEN`（Worker） | `JnLvqRyWopnO0yxGpgXdN8FLNdklnIiJpbhNp4lKKfU` | cli.py publish fallback |
-| `WORKER_URL` | `https://proxy-sub-aggregator.proxy-aggregator.workers.dev` | cli.py + health-check.yml fallback |
-| D1 database_id | `1b837756-1913-43e7-b727-2d5a23bb8a78` | wrangler.toml |
-| KV id | `a8cc252082fc4736b5e9ce897cd33f37` | wrangler.toml |
+| `RESIN_ADMIN_TOKEN` | .env / GitHub Secrets | resin admin（本地 Docker） |
+| `RESIN_PROXY_TOKEN` | resin Docker env（本地） | 數據面 token |
+| `RESIN_URL` | .env / 預設 `http://localhost:2260` | 本地 resin |
+| `ADMIN_TOKEN`（Worker） | GitHub Secrets + Cloudflare Worker secret | `wrangler secret put ADMIN_TOKEN`；cli publish 必填 |
+| `WORKER_URL` | 預設 `https://proxy-sub-aggregator.proxy-aggregator.workers.dev` | Worker URL（非 secret） |
+| D1 database_id | `src/worker/wrangler.toml` | 資源 id（非 secret） |
+| KV id | `src/worker/wrangler.toml` | 資源 id（非 secret） |
+
+> ⚠️ 歷史 commit 曾寫死這些值，已輪換（舊值失效）。新值只在 secrets，勿再 commit。
 
 ---
 

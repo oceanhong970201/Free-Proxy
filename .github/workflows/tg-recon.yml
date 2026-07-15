@@ -48,7 +48,7 @@ jobs:
         run: python src/aggregator/cli.py publish-resin
         env:
           RESIN_URL: ${{ secrets.RESIN_URL || 'http://localhost:2260' }}
-          RESIN_ADMIN_TOKEN: ${{ secrets.RESIN_ADMIN_TOKEN || '48941200c6727066d94e2f77a2143e4a' }}
+          RESIN_ADMIN_TOKEN: ${{ secrets.RESIN_ADMIN_TOKEN }}
         continue-on-error: true   # resin runs on localhost Docker — not reachable from CI runner
 
       - name: Commit gray_nodes.jsonl

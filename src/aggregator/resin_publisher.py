@@ -5,9 +5,9 @@ health internally (via cloudflare.com/cdn-cgi/trace). This publisher only needs
 to push URI lines into a `local` subscription and trigger a refresh; resin does
 the liveness probing.
 
-Config (env, with verified localhost fallbacks — see _GRAY_SPEC.md):
+Config (env — repo is public, no hardcoded secrets):
   RESIN_URL            default http://localhost:2260
-  RESIN_ADMIN_TOKEN    default 48941200c6727066d94e2f77a2143e4a (admin / data-plane control)
+  RESIN_ADMIN_TOKEN    required (set in .env / GitHub Secrets; no default)
 
 Public API:
   publish_to_resin(name, uris, replace_existing=True) -> summary dict
@@ -32,7 +32,8 @@ LIVE = STATE / "live.jsonl"
 GRAY_NODES = STATE / "gray_nodes.jsonl"
 
 DEFAULT_RESIN_URL = "http://localhost:2260"
-DEFAULT_RESIN_ADMIN_TOKEN = "48941200c6727066d94e2f77a2143e4a"
+# RESIN_ADMIN_TOKEN must come from env (no hardcoded default — repo is public).
+# Set RESIN_ADMIN_TOKEN in .env (local) or GitHub Secrets (CI).
 
 DEFAULT_SUB_NAME = "free-proxy-aggregator"
 
@@ -55,9 +56,10 @@ _PROXY_SCHEMES = (
 
 
 def _config() -> tuple[str, str]:
-    """Return (base_url, admin_token) from env with localhost fallbacks."""
+    """Return (base_url, admin_token) from env. Token is required (no default
+    — repo is public). Returns ("", "") if unset so callers can skip resin."""
     base = os.environ.get("RESIN_URL", DEFAULT_RESIN_URL).rstrip("/")
-    token = os.environ.get("RESIN_ADMIN_TOKEN", DEFAULT_RESIN_ADMIN_TOKEN)
+    token = os.environ.get("RESIN_ADMIN_TOKEN", "")
     return base, token
 
 
@@ -132,6 +134,12 @@ def publish_to_resin(
     }
     if not uris:
         summary["error"] = "no uris provided"
+        return summary
+    if not token:
+        # No RESIN_ADMIN_TOKEN — skip resin (don't 401). Resin runs on localhost
+        # Docker; CI runner can't reach it anyway. Set RESIN_ADMIN_TOKEN in .env
+        # to enable local resin publishing.
+        summary["error"] = "RESIN_ADMIN_TOKEN not set (skipping resin)"
         return summary
 
     content = "\n".join(uris)

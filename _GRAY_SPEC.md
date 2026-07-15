@@ -7,8 +7,8 @@
 
 - URL: `http://localhost:2260`
 - API base: `http://localhost:2260/api/v1`
-- Admin auth: `Authorization: Bearer 48941200c6727066d94e2f77a2143e4a`（env `RESIN_ADMIN_TOKEN`）
-- Proxy token: `c4bf84ee16922c1a78c359364bbfa43a12964eb6`（env `RESIN_PROXY_TOKEN`，數據面用）
+- Admin auth: `Authorization: Bearer <RESIN_ADMIN_TOKEN>`（env `RESIN_ADMIN_TOKEN`，存 secrets，已輪換）
+- Proxy token: `<RESIN_PROXY_TOKEN>`（env `RESIN_PROXY_TOKEN`，數據面用，存 secrets）
 
 ## Resin API（已驗證可用）
 
