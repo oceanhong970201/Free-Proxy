@@ -1,4 +1,11 @@
 proxies:
+- name: ss-shadowso-149.22.95.183:443
+  type: ss
+  server: 149.22.95.183
+  port: 443
+  udp: true
+  password: shadowsocks
+  cipher: aes-256-gcm
 - name: vmess-d13fc2f5-82.198.246.250:180
   type: vmess
   server: 82.198.246.250
@@ -8,13 +15,15 @@ proxies:
   alterId: 0
   cipher: auto
   network: tcp
-- name: ss-G5p6ww4o-108.181.0.177:8388
-  type: ss
-  server: 108.181.0.177
-  port: 8388
+- name: vmess-b65a2d69-165.140.216.142:443
+  type: vmess
+  server: 165.140.216.142
+  port: 443
   udp: true
-  password: G5p6ww4o67HB
-  cipher: aes-256-gcm
+  uuid: b65a2d69-5634-42a2-e4be-54e8a6176900
+  alterId: 0
+  cipher: auto
+  network: tcp
 - name: ss-G5p6ww4o-108.181.118.10:8388
   type: ss
   server: 108.181.118.10
@@ -22,6 +31,22 @@ proxies:
   udp: true
   password: G5p6ww4o67HB
   cipher: aes-256-gcm
+- name: ss-G5p6ww4o-108.181.0.177:8388
+  type: ss
+  server: 108.181.0.177
+  port: 8388
+  udp: true
+  password: G5p6ww4o67HB
+  cipher: aes-256-gcm
+- name: vmess-e7d72a8d-165.140.216.141:443
+  type: vmess
+  server: 165.140.216.141
+  port: 443
+  udp: true
+  uuid: e7d72a8d-26f2-4b54-b366-0c43e0bcba7d
+  alterId: 0
+  cipher: auto
+  network: tcp
 - name: ss-shadowso-173.244.56.9:443
   type: ss
   server: 173.244.56.9
@@ -36,25 +61,16 @@ proxies:
   udp: true
   password: shadowsocks
   cipher: aes-256-gcm
-- name: ss-shadowso-156.146.38.167:443
+- name: ss-shadowso-156.146.38.170:443
   type: ss
-  server: 156.146.38.167
+  server: 156.146.38.170
   port: 443
   udp: true
   password: shadowsocks
   cipher: aes-256-gcm
-- name: vmess-e7d72a8d-165.140.216.141:443
-  type: vmess
-  server: 165.140.216.141
-  port: 443
-  udp: true
-  uuid: e7d72a8d-26f2-4b54-b366-0c43e0bcba7d
-  alterId: 0
-  cipher: auto
-  network: tcp
-- name: ss-shadowso-156.146.38.169:443
+- name: ss-shadowso-156.146.38.167:443
   type: ss
-  server: 156.146.38.169
+  server: 156.146.38.167
   port: 443
   udp: true
   password: shadowsocks
@@ -66,25 +82,37 @@ proxies:
   udp: true
   password: shadowsocks
   cipher: aes-256-gcm
-- name: ss-shadowso-156.146.38.170:443
+- name: ss-shadowso-156.146.38.169:443
   type: ss
-  server: 156.146.38.170
+  server: 156.146.38.169
   port: 443
   udp: true
   password: shadowsocks
   cipher: aes-256-gcm
-- name: vmess-b65a2d69-165.140.216.142:443
-  type: vmess
-  server: 165.140.216.142
+- name: ss-shadowso-37.19.198.244:443
+  type: ss
+  server: 37.19.198.244
   port: 443
   udp: true
-  uuid: b65a2d69-5634-42a2-e4be-54e8a6176900
-  alterId: 0
-  cipher: auto
-  network: tcp
-- name: ss-shadowso-149.22.95.183:443
+  password: shadowsocks
+  cipher: aes-256-gcm
+- name: ss-14fFPrbe-137.184.174.93:8080
   type: ss
-  server: 149.22.95.183
+  server: 137.184.174.93
+  port: 8080
+  udp: true
+  password: 14fFPrbezE3HDZzsMOr6
+  cipher: aes-256-gcm
+- name: ss-shadowso-37.19.198.243:443
+  type: ss
+  server: 37.19.198.243
+  port: 443
+  udp: true
+  password: shadowsocks
+  cipher: aes-256-gcm
+- name: ss-shadowso-37.19.198.236:443
+  type: ss
+  server: 37.19.198.236
   port: 443
   udp: true
   password: shadowsocks
@@ -105,41 +133,15 @@ proxies:
   udp: true
   password: shadowsocks
   cipher: aes-256-gcm
-- name: ss-shadowso-37.19.198.244:443
-  type: ss
-  server: 37.19.198.244
-  port: 443
+- name: hysteria2-user1:lh-38.148.249.252:8443
+  type: hysteria2
+  server: 38.148.249.252
+  port: 8443
   udp: true
-  password: shadowsocks
-  cipher: aes-256-gcm
-- name: ss-shadowso-37.19.198.236:443
-  type: ss
-  server: 37.19.198.236
-  port: 443
-  udp: true
-  password: shadowsocks
-  cipher: aes-256-gcm
-- name: ss-shadowso-37.19.198.243:443
-  type: ss
-  server: 37.19.198.243
-  port: 443
-  udp: true
-  password: shadowsocks
-  cipher: aes-256-gcm
-- name: ss-14fFPrbe-137.184.174.93:8080
-  type: ss
-  server: 137.184.174.93
-  port: 8080
-  udp: true
-  password: 14fFPrbezE3HDZzsMOr6
-  cipher: aes-256-gcm
-- name: ss-shadowso-149.22.87.204:443
-  type: ss
-  server: 149.22.87.204
-  port: 443
-  udp: true
-  password: shadowsocks
-  cipher: aes-256-gcm
+  password: user1:lhBCuvh5lxKoj5NJ
+  sni: superjay.cc
+  tls: true
+  skip-cert-verify: false
 - name: ss-shadowso-149.22.87.241:443
   type: ss
   server: 149.22.87.241
@@ -154,15 +156,15 @@ proxies:
   udp: true
   password: shadowsocks
   cipher: aes-256-gcm
-- name: trojan-PI360271-busy-lab.rooster465.autos:443
+- name: trojan-PI360271-faithful-clam.rooster465.autos:443
   type: trojan
-  server: busy-lab.rooster465.autos
+  server: faithful-clam.rooster465.autos
   port: 443
   udp: true
   password: PI36027154
   network: tcp
   skip-cert-verify: false
-  sni: busy-lab.rooster465.autos
+  sni: faithful-clam.rooster465.autos
   tls: true
 - name: trojan-CF682134-star-dodo.rooster465.autos:443
   type: trojan
@@ -184,16 +186,6 @@ proxies:
   skip-cert-verify: false
   sni: noble-tahr.rooster465.autos
   tls: true
-- name: trojan-PI360271-faithful-clam.rooster465.autos:443
-  type: trojan
-  server: faithful-clam.rooster465.autos
-  port: 443
-  udp: true
-  password: PI36027154
-  network: tcp
-  skip-cert-verify: false
-  sni: faithful-clam.rooster465.autos
-  tls: true
 - name: trojan-CF682134-equipped-moth.rooster465.autos:443
   type: trojan
   server: equipped-moth.rooster465.autos
@@ -203,6 +195,33 @@ proxies:
   network: tcp
   skip-cert-verify: false
   sni: equipped-moth.rooster465.autos
+  tls: true
+- name: trojan-PI360271-busy-lab.rooster465.autos:443
+  type: trojan
+  server: busy-lab.rooster465.autos
+  port: 443
+  udp: true
+  password: PI36027154
+  network: tcp
+  skip-cert-verify: false
+  sni: busy-lab.rooster465.autos
+  tls: true
+- name: ss-shadowso-149.22.87.204:443
+  type: ss
+  server: 149.22.87.204
+  port: 443
+  udp: true
+  password: shadowsocks
+  cipher: aes-256-gcm
+- name: trojan-PI360271-exciting-grizzly.rooster465.autos:443
+  type: trojan
+  server: exciting-grizzly.rooster465.autos
+  port: 443
+  udp: true
+  password: PI36027154
+  network: tcp
+  skip-cert-verify: false
+  sni: exciting-grizzly.rooster465.autos
   tls: true
 - name: trojan-PI360271-stirred-buck.rooster465.autos:443
   type: trojan
@@ -214,22 +233,176 @@ proxies:
   skip-cert-verify: false
   sni: stirred-buck.rooster465.autos
   tls: true
-- name: trojan-PI360271-exciting-grizzly.rooster465.autos:443
-  type: trojan
-  server: exciting-grizzly.rooster465.autos
-  port: 443
-  udp: true
-  password: PI36027154
-  network: tcp
-  skip-cert-verify: false
-  sni: exciting-grizzly.rooster465.autos
-  tls: true
 - name: ss-shadowso-109.201.152.181:443
   type: ss
   server: 109.201.152.181
   port: 443
   udp: true
   password: shadowsocks
+  cipher: aes-256-gcm
+- name: ss-shadowso-158.173.24.73:443
+  type: ss
+  server: 158.173.24.73
+  port: 443
+  udp: true
+  password: shadowsocks
+  cipher: aes-256-gcm
+- name: ss-14fFPrbe-146.70.61.37:8080
+  type: ss
+  server: 146.70.61.37
+  port: 8080
+  udp: true
+  password: 14fFPrbezE3HDZzsMOr6
+  cipher: aes-256-gcm
+- name: ss-oZIoA69Q-82.38.31.32:443
+  type: ss
+  server: 82.38.31.32
+  port: 443
+  udp: true
+  password: oZIoA69Q8yhcQV8ka3Pa3A
+  cipher: aes-256-gcm
+- name: ss-oZIoA69Q-82.38.31.29:443
+  type: ss
+  server: 82.38.31.29
+  port: 443
+  udp: true
+  password: oZIoA69Q8yhcQV8ka3Pa3A
+  cipher: aes-256-gcm
+- name: ss-oZIoA69Q-82.38.31.47:8080
+  type: ss
+  server: 82.38.31.47
+  port: 8080
+  udp: true
+  password: oZIoA69Q8yhcQV8ka3Pa3A
+  cipher: aes-256-gcm
+- name: ss-oZIoA69Q-193.29.139.235:8080
+  type: ss
+  server: 193.29.139.235
+  port: 8080
+  udp: true
+  password: oZIoA69Q8yhcQV8ka3Pa3A
+  cipher: aes-256-gcm
+- name: ss-TEzjfAYq-141.164.45.187:6679
+  type: ss
+  server: 141.164.45.187
+  port: 6679
+  udp: true
+  password: TEzjfAYq2IjtuoS
+  cipher: aes-256-gcm
+- name: ss-oZIoA69Q-82.38.31.149:8080
+  type: ss
+  server: 82.38.31.149
+  port: 8080
+  udp: true
+  password: oZIoA69Q8yhcQV8ka3Pa3A
+  cipher: aes-256-gcm
+- name: ss-oZIoA69Q-82.38.31.57:443
+  type: ss
+  server: 82.38.31.57
+  port: 443
+  udp: true
+  password: oZIoA69Q8yhcQV8ka3Pa3A
+  cipher: aes-256-gcm
+- name: ss-faBAoD54-141.164.45.187:2376
+  type: ss
+  server: 141.164.45.187
+  port: 2376
+  udp: true
+  password: faBAoD54k87UJG7
+  cipher: aes-256-gcm
+- name: ss-oZIoA69Q-193.29.139.151:8080
+  type: ss
+  server: 193.29.139.151
+  port: 8080
+  udp: true
+  password: oZIoA69Q8yhcQV8ka3Pa3A
+  cipher: aes-256-gcm
+- name: ss-k1dBOmOB-82.38.31.204:8080
+  type: ss
+  server: 82.38.31.204
+  port: 8080
+  udp: true
+  password: k1dBOmOB4oqi7Ump37a1bQ
+  cipher: aes-256-gcm
+- name: ss-k1dBOmOB-82.38.31.195:8080
+  type: ss
+  server: 82.38.31.195
+  port: 8080
+  udp: true
+  password: k1dBOmOB4oqi7Ump37a1bQ
+  cipher: aes-256-gcm
+- name: ss-k1dBOmOB-82.38.31.216:8080
+  type: ss
+  server: 82.38.31.216
+  port: 8080
+  udp: true
+  password: k1dBOmOB4oqi7Ump37a1bQ
+  cipher: aes-256-gcm
+- name: ss-k1dBOmOB-82.38.31.202:8080
+  type: ss
+  server: 82.38.31.202
+  port: 8080
+  udp: true
+  password: k1dBOmOB4oqi7Ump37a1bQ
+  cipher: aes-256-gcm
+- name: ss-CJmTCCx7-108.181.58.239:8388
+  type: ss
+  server: 108.181.58.239
+  port: 8388
+  udp: true
+  password: CJmTCCx7Ltud
+  cipher: aes-256-gcm
+- name: ss-k1dBOmOB-82.38.31.210:8080
+  type: ss
+  server: 82.38.31.210
+  port: 8080
+  udp: true
+  password: k1dBOmOB4oqi7Ump37a1bQ
+  cipher: aes-256-gcm
+- name: ss-oZIoA69Q-82.38.31.164:8080
+  type: ss
+  server: 82.38.31.164
+  port: 8080
+  udp: true
+  password: oZIoA69Q8yhcQV8ka3Pa3A
+  cipher: aes-256-gcm
+- name: trojan-dh-Ws-Yo-185.137.157.142:443
+  type: trojan
+  server: 185.137.157.142
+  port: 443
+  udp: true
+  password: dh-Ws-YoJIgTYLZ-A5VljeduVse-vhDl7Q
+  network: tcp
+  skip-cert-verify: false
+  sni: 185.137.157.142
+  tls: true
+- name: ss-CJmTCCx7-108.181.126.122:8388
+  type: ss
+  server: 108.181.126.122
+  port: 8388
+  udp: true
+  password: CJmTCCx7Ltud
+  cipher: aes-256-gcm
+- name: ss-k1dBOmOB-82.38.31.193:8080
+  type: ss
+  server: 82.38.31.193
+  port: 8080
+  udp: true
+  password: k1dBOmOB4oqi7Ump37a1bQ
+  cipher: aes-256-gcm
+- name: ss-k1dBOmOB-82.38.31.198:8080
+  type: ss
+  server: 82.38.31.198
+  port: 8080
+  udp: true
+  password: k1dBOmOB4oqi7Ump37a1bQ
+  cipher: aes-256-gcm
+- name: ss-k1dBOmOB-82.38.31.211:8080
+  type: ss
+  server: 82.38.31.211
+  port: 8080
+  udp: true
+  password: k1dBOmOB4oqi7Ump37a1bQ
   cipher: aes-256-gcm
 - name: ss-RexnBgU7-94.156.250.148:7001
   type: ss
@@ -245,26 +418,19 @@ proxies:
   udp: true
   password: shadowsocks
   cipher: aes-256-gcm
-- name: ss-14fFPrbe-146.70.61.37:8080
+- name: ss-RexnBgU7-141.164.45.187:7001
   type: ss
-  server: 146.70.61.37
+  server: 141.164.45.187
+  port: 7001
+  udp: true
+  password: RexnBgU7EV5ADxG
+  cipher: aes-256-gcm
+- name: ss-k1dBOmOB-82.38.31.206:8080
+  type: ss
+  server: 82.38.31.206
   port: 8080
   udp: true
-  password: 14fFPrbezE3HDZzsMOr6
-  cipher: aes-256-gcm
-- name: ss-oZIoA69Q-82.38.31.149:8080
-  type: ss
-  server: 82.38.31.149
-  port: 8080
-  udp: true
-  password: oZIoA69Q8yhcQV8ka3Pa3A
-  cipher: aes-256-gcm
-- name: ss-CJmTCCx7-108.181.126.122:8388
-  type: ss
-  server: 108.181.126.122
-  port: 8388
-  udp: true
-  password: CJmTCCx7Ltud
+  password: k1dBOmOB4oqi7Ump37a1bQ
   cipher: aes-256-gcm
 - name: ss-k1dBOmOB-82.38.31.192:8080
   type: ss
@@ -273,75 +439,12 @@ proxies:
   udp: true
   password: k1dBOmOB4oqi7Ump37a1bQ
   cipher: aes-256-gcm
-- name: ss-oZIoA69Q-193.29.139.151:8080
+- name: ss-k1dBOmOB-82.38.31.189:8080
   type: ss
-  server: 193.29.139.151
-  port: 8080
-  udp: true
-  password: oZIoA69Q8yhcQV8ka3Pa3A
-  cipher: aes-256-gcm
-- name: ss-k1dBOmOB-82.38.31.212:8080
-  type: ss
-  server: 82.38.31.212
+  server: 82.38.31.189
   port: 8080
   udp: true
   password: k1dBOmOB4oqi7Ump37a1bQ
-  cipher: aes-256-gcm
-- name: ss-k1dBOmOB-82.38.31.210:8080
-  type: ss
-  server: 82.38.31.210
-  port: 8080
-  udp: true
-  password: k1dBOmOB4oqi7Ump37a1bQ
-  cipher: aes-256-gcm
-- name: ss-k1dBOmOB-82.38.31.211:8080
-  type: ss
-  server: 82.38.31.211
-  port: 8080
-  udp: true
-  password: k1dBOmOB4oqi7Ump37a1bQ
-  cipher: aes-256-gcm
-- name: ss-k1dBOmOB-82.38.31.202:8080
-  type: ss
-  server: 82.38.31.202
-  port: 8080
-  udp: true
-  password: k1dBOmOB4oqi7Ump37a1bQ
-  cipher: aes-256-gcm
-- name: ss-oZIoA69Q-82.38.31.32:443
-  type: ss
-  server: 82.38.31.32
-  port: 443
-  udp: true
-  password: oZIoA69Q8yhcQV8ka3Pa3A
-  cipher: aes-256-gcm
-- name: ss-k1dBOmOB-82.38.31.213:8080
-  type: ss
-  server: 82.38.31.213
-  port: 8080
-  udp: true
-  password: k1dBOmOB4oqi7Ump37a1bQ
-  cipher: aes-256-gcm
-- name: ss-CJmTCCx7-108.181.58.239:8388
-  type: ss
-  server: 108.181.58.239
-  port: 8388
-  udp: true
-  password: CJmTCCx7Ltud
-  cipher: aes-256-gcm
-- name: ss-k1dBOmOB-82.38.31.199:8080
-  type: ss
-  server: 82.38.31.199
-  port: 8080
-  udp: true
-  password: k1dBOmOB4oqi7Ump37a1bQ
-  cipher: aes-256-gcm
-- name: ss-oZIoA69Q-193.29.139.235:8080
-  type: ss
-  server: 193.29.139.235
-  port: 8080
-  udp: true
-  password: oZIoA69Q8yhcQV8ka3Pa3A
   cipher: aes-256-gcm
 - name: ss-k1dBOmOB-82.38.31.176:8080
   type: ss
@@ -350,415 +453,12 @@ proxies:
   udp: true
   password: k1dBOmOB4oqi7Ump37a1bQ
   cipher: aes-256-gcm
-- name: ss-k1dBOmOB-82.38.31.214:8080
+- name: ss-k1dBOmOB-82.38.31.199:8080
   type: ss
-  server: 82.38.31.214
+  server: 82.38.31.199
   port: 8080
   udp: true
   password: k1dBOmOB4oqi7Ump37a1bQ
-  cipher: aes-256-gcm
-- name: ss-k1dBOmOB-82.38.31.208:8080
-  type: ss
-  server: 82.38.31.208
-  port: 8080
-  udp: true
-  password: k1dBOmOB4oqi7Ump37a1bQ
-  cipher: aes-256-gcm
-- name: ss-oZIoA69Q-82.38.31.47:8080
-  type: ss
-  server: 82.38.31.47
-  port: 8080
-  udp: true
-  password: oZIoA69Q8yhcQV8ka3Pa3A
-  cipher: aes-256-gcm
-- name: ss-oZIoA69Q-82.38.31.57:443
-  type: ss
-  server: 82.38.31.57
-  port: 443
-  udp: true
-  password: oZIoA69Q8yhcQV8ka3Pa3A
-  cipher: aes-256-gcm
-- name: ss-diOMBU5I-137.74.119.18:10443
-  type: ss
-  server: 137.74.119.18
-  port: 10443
-  udp: true
-  password: diOMBU5IDvJcFqyNPbRjYR
-  cipher: aes-256-gcm
-- name: ss-k1dBOmOB-82.38.31.219:8080
-  type: ss
-  server: 82.38.31.219
-  port: 8080
-  udp: true
-  password: k1dBOmOB4oqi7Ump37a1bQ
-  cipher: aes-256-gcm
-- name: ss-k1dBOmOB-82.38.31.193:8080
-  type: ss
-  server: 82.38.31.193
-  port: 8080
-  udp: true
-  password: k1dBOmOB4oqi7Ump37a1bQ
-  cipher: aes-256-gcm
-- name: ss-oZIoA69Q-82.38.31.35:8080
-  type: ss
-  server: 82.38.31.35
-  port: 8080
-  udp: true
-  password: oZIoA69Q8yhcQV8ka3Pa3A
-  cipher: aes-256-gcm
-- name: ss-k1dBOmOB-82.38.31.207:8080
-  type: ss
-  server: 82.38.31.207
-  port: 8080
-  udp: true
-  password: k1dBOmOB4oqi7Ump37a1bQ
-  cipher: aes-256-gcm
-- name: ss-oZIoA69Q-193.29.139.204:8080
-  type: ss
-  server: 193.29.139.204
-  port: 8080
-  udp: true
-  password: oZIoA69Q8yhcQV8ka3Pa3A
-  cipher: aes-256-gcm
-- name: ss-oZIoA69Q-82.38.31.164:8080
-  type: ss
-  server: 82.38.31.164
-  port: 8080
-  udp: true
-  password: oZIoA69Q8yhcQV8ka3Pa3A
-  cipher: aes-256-gcm
-- name: ss-oZIoA69Q-82.38.31.29:443
-  type: ss
-  server: 82.38.31.29
-  port: 443
-  udp: true
-  password: oZIoA69Q8yhcQV8ka3Pa3A
-  cipher: aes-256-gcm
-- name: ss-k1dBOmOB-82.38.31.183:8080
-  type: ss
-  server: 82.38.31.183
-  port: 8080
-  udp: true
-  password: k1dBOmOB4oqi7Ump37a1bQ
-  cipher: aes-256-gcm
-- name: ss-k1dBOmOB-82.38.31.187:8080
-  type: ss
-  server: 82.38.31.187
-  port: 8080
-  udp: true
-  password: k1dBOmOB4oqi7Ump37a1bQ
-  cipher: aes-256-gcm
-- name: ss-1hhrqrok-209.46.102.22:8388
-  type: ss
-  server: 209.46.102.22
-  port: 8388
-  udp: true
-  password: 1hhrqrokj3ag
-  cipher: aes-256-gcm
-- name: ss-ARgvGZyw-185.213.23.63:990
-  type: ss
-  server: 185.213.23.63
-  port: 990
-  udp: true
-  password: ARgvGZywA+gacgGV26Bvmu05+wZmRW/j+AdU+Z8Bt44=
-  cipher: aes-256-gcm
-- name: ss-k1dBOmOB-82.38.31.191:8080
-  type: ss
-  server: 82.38.31.191
-  port: 8080
-  udp: true
-  password: k1dBOmOB4oqi7Ump37a1bQ
-  cipher: aes-256-gcm
-- name: ss-TEzjfAYq-141.164.45.187:6679
-  type: ss
-  server: 141.164.45.187
-  port: 6679
-  udp: true
-  password: TEzjfAYq2IjtuoS
-  cipher: aes-256-gcm
-- name: ss-k1dBOmOB-82.38.31.185:8080
-  type: ss
-  server: 82.38.31.185
-  port: 8080
-  udp: true
-  password: k1dBOmOB4oqi7Ump37a1bQ
-  cipher: aes-256-gcm
-- name: ss-faBAoD54-141.164.45.187:2376
-  type: ss
-  server: 141.164.45.187
-  port: 2376
-  udp: true
-  password: faBAoD54k87UJG7
-  cipher: aes-256-gcm
-- name: ss-RexnBgU7-185.213.20.110:7001
-  type: ss
-  server: 185.213.20.110
-  port: 7001
-  udp: true
-  password: RexnBgU7EV5ADxG
-  cipher: aes-256-gcm
-- name: ss-k1dBOmOB-82.38.31.179:8080
-  type: ss
-  server: 82.38.31.179
-  port: 8080
-  udp: true
-  password: k1dBOmOB4oqi7Ump37a1bQ
-  cipher: aes-256-gcm
-- name: trojan-CF682134-tolerant-stag.rooster465.autos:443
-  type: trojan
-  server: tolerant-stag.rooster465.autos
-  port: 443
-  udp: true
-  password: CF68213490
-  network: tcp
-  skip-cert-verify: false
-  sni: tolerant-stag.rooster465.autos
-  tls: true
-- name: trojan-CF682134-diverse-thrush.rooster465.autos:443
-  type: trojan
-  server: diverse-thrush.rooster465.autos
-  port: 443
-  udp: true
-  password: CF68213490
-  network: tcp
-  skip-cert-verify: false
-  sni: diverse-thrush.rooster465.autos
-  tls: true
-- name: hysteria2-user1:lh-38.148.249.252:8443
-  type: hysteria2
-  server: 38.148.249.252
-  port: 8443
-  udp: true
-  password: user1:lhBCuvh5lxKoj5NJ
-  sni: superjay.cc
-  tls: true
-  skip-cert-verify: false
-- name: ss-3t21e/P6-43.173.98.184:8388
-  type: ss
-  server: 43.173.98.184
-  port: 8388
-  udp: true
-  password: 3t21e/P6fxeSULmI2S4f0mJ3q3b2TiQO
-  cipher: aes-256-gcm
-- name: ss-gaM3vd5z-tinkered-pennies-puppies.freesocks.work:443
-  type: ss
-  server: tinkered-pennies-puppies.freesocks.work
-  port: 443
-  udp: true
-  password: gaM3vd5zfR1ay1v7hfn4X6
-  cipher: aes-256-gcm
-- name: ss-shadowso-158.173.24.73:443
-  type: ss
-  server: 158.173.24.73
-  port: 443
-  udp: true
-  password: shadowsocks
-  cipher: aes-256-gcm
-- name: ss-shadowso-141.98.101.178:443
-  type: ss
-  server: 141.98.101.178
-  port: 443
-  udp: true
-  password: shadowsocks
-  cipher: aes-256-gcm
-- name: ss-shadowso-141.98.101.179:443
-  type: ss
-  server: 141.98.101.179
-  port: 443
-  udp: true
-  password: shadowsocks
-  cipher: aes-256-gcm
-- name: ss-k1dBOmOB-82.38.31.198:8080
-  type: ss
-  server: 82.38.31.198
-  port: 8080
-  udp: true
-  password: k1dBOmOB4oqi7Ump37a1bQ
-  cipher: aes-256-gcm
-- name: ss-oZIoA69Q-82.38.31.7:8080
-  type: ss
-  server: 82.38.31.7
-  port: 8080
-  udp: true
-  password: oZIoA69Q8yhcQV8ka3Pa3A
-  cipher: aes-256-gcm
-- name: ss-oZIoA69Q-82.38.31.3:8080
-  type: ss
-  server: 82.38.31.3
-  port: 8080
-  udp: true
-  password: oZIoA69Q8yhcQV8ka3Pa3A
-  cipher: aes-256-gcm
-- name: ss-k1dBOmOB-82.38.31.195:8080
-  type: ss
-  server: 82.38.31.195
-  port: 8080
-  udp: true
-  password: k1dBOmOB4oqi7Ump37a1bQ
-  cipher: aes-256-gcm
-- name: ss-shadowso-141.98.101.181:443
-  type: ss
-  server: 141.98.101.181
-  port: 443
-  udp: true
-  password: shadowsocks
-  cipher: aes-256-gcm
-- name: ss-k1dBOmOB-82.38.31.215:8080
-  type: ss
-  server: 82.38.31.215
-  port: 8080
-  udp: true
-  password: k1dBOmOB4oqi7Ump37a1bQ
-  cipher: aes-256-gcm
-- name: ss-oZIoA69Q-82.38.31.155:8080
-  type: ss
-  server: 82.38.31.155
-  port: 8080
-  udp: true
-  password: oZIoA69Q8yhcQV8ka3Pa3A
-  cipher: aes-256-gcm
-- name: ss-shadowso-141.98.101.182:443
-  type: ss
-  server: 141.98.101.182
-  port: 443
-  udp: true
-  password: shadowsocks
-  cipher: aes-256-gcm
-- name: ss-k1dBOmOB-82.38.31.200:8080
-  type: ss
-  server: 82.38.31.200
-  port: 8080
-  udp: true
-  password: k1dBOmOB4oqi7Ump37a1bQ
-  cipher: aes-256-gcm
-- name: ss-k1dBOmOB-82.38.31.216:8080
-  type: ss
-  server: 82.38.31.216
-  port: 8080
-  udp: true
-  password: k1dBOmOB4oqi7Ump37a1bQ
-  cipher: aes-256-gcm
-- name: ss-oZIoA69Q-82.38.31.10:8080
-  type: ss
-  server: 82.38.31.10
-  port: 8080
-  udp: true
-  password: oZIoA69Q8yhcQV8ka3Pa3A
-  cipher: aes-256-gcm
-- name: ss-oZIoA69Q-82.38.31.2:8080
-  type: ss
-  server: 82.38.31.2
-  port: 8080
-  udp: true
-  password: oZIoA69Q8yhcQV8ka3Pa3A
-  cipher: aes-256-gcm
-- name: trojan-dh-Ws-Yo-185.137.157.149:443
-  type: trojan
-  server: 185.137.157.149
-  port: 443
-  udp: true
-  password: dh-Ws-YoJIgTYLZ-A5VljeduVse-vhDl7Q
-  network: tcp
-  skip-cert-verify: false
-  sni: 185.137.157.149
-  tls: true
-- name: trojan-dh-Ws-Yo-185.137.157.128:443
-  type: trojan
-  server: 185.137.157.128
-  port: 443
-  udp: true
-  password: dh-Ws-YoJIgTYLZ-A5VljeduVse-vhDl7Q
-  network: tcp
-  sni: 185.137.157.128
-  skip-cert-verify: false
-- name: trojan-dh-Ws-Yo-185.137.157.156:443
-  type: trojan
-  server: 185.137.157.156
-  port: 443
-  udp: true
-  password: dh-Ws-YoJIgTYLZ-A5VljeduVse-vhDl7Q
-  network: tcp
-  sni: 185.137.157.156
-  skip-cert-verify: false
-- name: ss-hCCWOcIs-216.105.168.18:443
-  type: ss
-  server: 216.105.168.18
-  port: 443
-  udp: true
-  password: hCCWOcIsK5wrFz4OX70rWf
-  cipher: aes-256-gcm
-- name: trojan-dh-Ws-Yo-185.137.157.145:443
-  type: trojan
-  server: 185.137.157.145
-  port: 443
-  udp: true
-  password: dh-Ws-YoJIgTYLZ-A5VljeduVse-vhDl7Q
-  network: tcp
-  skip-cert-verify: false
-  sni: 185.137.157.145
-  tls: true
-- name: trojan-dh-Ws-Yo-185.137.157.140:443
-  type: trojan
-  server: 185.137.157.140
-  port: 443
-  udp: true
-  password: dh-Ws-YoJIgTYLZ-A5VljeduVse-vhDl7Q
-  network: tcp
-  skip-cert-verify: false
-  sni: 185.137.157.140
-  tls: true
-- name: ss-uROuEqsL-57.129.121.230:10443
-  type: ss
-  server: 57.129.121.230
-  port: 10443
-  udp: true
-  password: uROuEqsL8IUMMVb4wDwnGU
-  cipher: aes-256-gcm
-- name: trojan-dh-Ws-Yo-185.137.157.135:443
-  type: trojan
-  server: 185.137.157.135
-  port: 443
-  udp: true
-  password: dh-Ws-YoJIgTYLZ-A5VljeduVse-vhDl7Q
-  network: tcp
-  sni: 185.137.157.135
-  skip-cert-verify: false
-- name: trojan-dh-Ws-Yo-185.137.157.138:443
-  type: trojan
-  server: 185.137.157.138
-  port: 443
-  udp: true
-  password: dh-Ws-YoJIgTYLZ-A5VljeduVse-vhDl7Q
-  network: tcp
-  sni: 185.137.157.138
-  skip-cert-verify: false
-- name: ss-qwerREWQ-211.178.105.134:6123
-  type: ss
-  server: 211.178.105.134
-  port: 6123
-  udp: true
-  password: qwerREWQ@@
-  cipher: aes-256-gcm
-- name: ss-k1dBOmOB-82.38.31.217:8080
-  type: ss
-  server: 82.38.31.217
-  port: 8080
-  udp: true
-  password: k1dBOmOB4oqi7Ump37a1bQ
-  cipher: aes-256-gcm
-- name: ss-3K7ZItDk-168.63.58.89:443
-  type: ss
-  server: 168.63.58.89
-  port: 443
-  udp: true
-  password: 3K7ZItDk9Co2eOew
-  cipher: aes-256-gcm
-- name: ss-oZIoA69Q-82.38.31.35:443
-  type: ss
-  server: 82.38.31.35
-  port: 443
-  udp: true
-  password: oZIoA69Q8yhcQV8ka3Pa3A
   cipher: aes-256-gcm
 - name: trojan-CF682134-devoted-zebra.rooster465.autos:443
   type: trojan
@@ -770,12 +470,228 @@ proxies:
   skip-cert-verify: false
   sni: devoted-zebra.rooster465.autos
   tls: true
-- name: ss-k1dBOmOB-82.38.31.189:8080
+- name: trojan-CF682134-tolerant-stag.rooster465.autos:443
+  type: trojan
+  server: tolerant-stag.rooster465.autos
+  port: 443
+  udp: true
+  password: CF68213490
+  network: tcp
+  skip-cert-verify: false
+  sni: tolerant-stag.rooster465.autos
+  tls: true
+- name: ss-k1dBOmOB-82.38.31.190:8080
   type: ss
-  server: 82.38.31.189
+  server: 82.38.31.190
   port: 8080
   udp: true
   password: k1dBOmOB4oqi7Ump37a1bQ
+  cipher: aes-256-gcm
+- name: ss-k1dBOmOB-82.38.31.207:8080
+  type: ss
+  server: 82.38.31.207
+  port: 8080
+  udp: true
+  password: k1dBOmOB4oqi7Ump37a1bQ
+  cipher: aes-256-gcm
+- name: trojan-CF682134-diverse-thrush.rooster465.autos:443
+  type: trojan
+  server: diverse-thrush.rooster465.autos
+  port: 443
+  udp: true
+  password: CF68213490
+  network: tcp
+  skip-cert-verify: false
+  sni: diverse-thrush.rooster465.autos
+  tls: true
+- name: ss-diOMBU5I-137.74.119.18:10443
+  type: ss
+  server: 137.74.119.18
+  port: 10443
+  udp: true
+  password: diOMBU5IDvJcFqyNPbRjYR
+  cipher: aes-256-gcm
+- name: ss-k1dBOmOB-82.38.31.212:8080
+  type: ss
+  server: 82.38.31.212
+  port: 8080
+  udp: true
+  password: k1dBOmOB4oqi7Ump37a1bQ
+  cipher: aes-256-gcm
+- name: ss-hCCWOcIs-216.105.168.18:443
+  type: ss
+  server: 216.105.168.18
+  port: 443
+  udp: true
+  password: hCCWOcIsK5wrFz4OX70rWf
+  cipher: aes-256-gcm
+- name: ss-gaM3vd5z-tinkered-pennies-puppies.freesocks.work:443
+  type: ss
+  server: tinkered-pennies-puppies.freesocks.work
+  port: 443
+  udp: true
+  password: gaM3vd5zfR1ay1v7hfn4X6
+  cipher: aes-256-gcm
+- name: ss-3t21e/P6-43.173.98.184:8388
+  type: ss
+  server: 43.173.98.184
+  port: 8388
+  udp: true
+  password: 3t21e/P6fxeSULmI2S4f0mJ3q3b2TiQO
+  cipher: aes-256-gcm
+- name: ss-oZIoA69Q-82.38.31.3:8080
+  type: ss
+  server: 82.38.31.3
+  port: 8080
+  udp: true
+  password: oZIoA69Q8yhcQV8ka3Pa3A
+  cipher: aes-256-gcm
+- name: ss-shadowso-141.98.101.181:443
+  type: ss
+  server: 141.98.101.181
+  port: 443
+  udp: true
+  password: shadowsocks
+  cipher: aes-256-gcm
+- name: ss-shadowso-141.98.101.178:443
+  type: ss
+  server: 141.98.101.178
+  port: 443
+  udp: true
+  password: shadowsocks
+  cipher: aes-256-gcm
+- name: ss-oZIoA69Q-82.38.31.2:8080
+  type: ss
+  server: 82.38.31.2
+  port: 8080
+  udp: true
+  password: oZIoA69Q8yhcQV8ka3Pa3A
+  cipher: aes-256-gcm
+- name: ss-oZIoA69Q-82.38.31.155:8080
+  type: ss
+  server: 82.38.31.155
+  port: 8080
+  udp: true
+  password: oZIoA69Q8yhcQV8ka3Pa3A
+  cipher: aes-256-gcm
+- name: ss-1hhrqrok-209.46.102.22:8388
+  type: ss
+  server: 209.46.102.22
+  port: 8388
+  udp: true
+  password: 1hhrqrokj3ag
+  cipher: aes-256-gcm
+- name: ss-k1dBOmOB-82.38.31.213:8080
+  type: ss
+  server: 82.38.31.213
+  port: 8080
+  udp: true
+  password: k1dBOmOB4oqi7Ump37a1bQ
+  cipher: aes-256-gcm
+- name: ss-shadowso-141.98.101.179:443
+  type: ss
+  server: 141.98.101.179
+  port: 443
+  udp: true
+  password: shadowsocks
+  cipher: aes-256-gcm
+- name: ss-oZIoA69Q-193.29.139.204:8080
+  type: ss
+  server: 193.29.139.204
+  port: 8080
+  udp: true
+  password: oZIoA69Q8yhcQV8ka3Pa3A
+  cipher: aes-256-gcm
+- name: ss-shadowso-141.98.101.182:443
+  type: ss
+  server: 141.98.101.182
+  port: 443
+  udp: true
+  password: shadowsocks
+  cipher: aes-256-gcm
+- name: ss-k1dBOmOB-82.38.31.214:8080
+  type: ss
+  server: 82.38.31.214
+  port: 8080
+  udp: true
+  password: k1dBOmOB4oqi7Ump37a1bQ
+  cipher: aes-256-gcm
+- name: ss-uROuEqsL-57.129.121.230:10443
+  type: ss
+  server: 57.129.121.230
+  port: 10443
+  udp: true
+  password: uROuEqsL8IUMMVb4wDwnGU
+  cipher: aes-256-gcm
+- name: trojan-dh-Ws-Yo-185.137.157.149:443
+  type: trojan
+  server: 185.137.157.149
+  port: 443
+  udp: true
+  password: dh-Ws-YoJIgTYLZ-A5VljeduVse-vhDl7Q
+  network: tcp
+  skip-cert-verify: false
+  sni: 185.137.157.149
+  tls: true
+- name: trojan-dh-Ws-Yo-185.137.157.135:443
+  type: trojan
+  server: 185.137.157.135
+  port: 443
+  udp: true
+  password: dh-Ws-YoJIgTYLZ-A5VljeduVse-vhDl7Q
+  network: tcp
+  sni: 185.137.157.135
+  skip-cert-verify: false
+- name: trojan-dh-Ws-Yo-185.137.157.156:443
+  type: trojan
+  server: 185.137.157.156
+  port: 443
+  udp: true
+  password: dh-Ws-YoJIgTYLZ-A5VljeduVse-vhDl7Q
+  network: tcp
+  sni: 185.137.157.156
+  skip-cert-verify: false
+- name: trojan-dh-Ws-Yo-185.137.157.138:443
+  type: trojan
+  server: 185.137.157.138
+  port: 443
+  udp: true
+  password: dh-Ws-YoJIgTYLZ-A5VljeduVse-vhDl7Q
+  network: tcp
+  sni: 185.137.157.138
+  skip-cert-verify: false
+- name: trojan-dh-Ws-Yo-185.137.157.145:443
+  type: trojan
+  server: 185.137.157.145
+  port: 443
+  udp: true
+  password: dh-Ws-YoJIgTYLZ-A5VljeduVse-vhDl7Q
+  network: tcp
+  skip-cert-verify: false
+  sni: 185.137.157.145
+  tls: true
+- name: ss-RexnBgU7-185.213.20.110:7001
+  type: ss
+  server: 185.213.20.110
+  port: 7001
+  udp: true
+  password: RexnBgU7EV5ADxG
+  cipher: aes-256-gcm
+- name: trojan-dh-Ws-Yo-185.137.157.128:443
+  type: trojan
+  server: 185.137.157.128
+  port: 443
+  udp: true
+  password: dh-Ws-YoJIgTYLZ-A5VljeduVse-vhDl7Q
+  network: tcp
+  sni: 185.137.157.128
+  skip-cert-verify: false
+- name: ss-oZIoA69Q-82.38.31.7:8080
+  type: ss
+  server: 82.38.31.7
+  port: 8080
+  udp: true
+  password: oZIoA69Q8yhcQV8ka3Pa3A
   cipher: aes-256-gcm
 - name: ss-qwerREWQ-221.139.79.57:13979
   type: ss
@@ -784,24 +700,80 @@ proxies:
   udp: true
   password: qwerREWQ@@
   cipher: aes-256-gcm
-- name: ss-oZIoA69Q-82.38.31.11:8080
+- name: ss-3K7ZItDk-168.63.58.89:443
   type: ss
-  server: 82.38.31.11
+  server: 168.63.58.89
+  port: 443
+  udp: true
+  password: 3K7ZItDk9Co2eOew
+  cipher: aes-256-gcm
+- name: ss-qwerREWQ-211.178.105.134:6123
+  type: ss
+  server: 211.178.105.134
+  port: 6123
+  udp: true
+  password: qwerREWQ@@
+  cipher: aes-256-gcm
+- name: ss-k1dBOmOB-82.38.31.179:8080
+  type: ss
+  server: 82.38.31.179
+  port: 8080
+  udp: true
+  password: k1dBOmOB4oqi7Ump37a1bQ
+  cipher: aes-256-gcm
+- name: trojan-dh-Ws-Yo-185.137.157.151:443
+  type: trojan
+  server: 185.137.157.151
+  port: 443
+  udp: true
+  password: dh-Ws-YoJIgTYLZ-A5VljeduVse-vhDl7Q
+  network: tcp
+  sni: 185.137.157.151
+  skip-cert-verify: false
+- name: ss-k1dBOmOB-82.38.31.203:8080
+  type: ss
+  server: 82.38.31.203
+  port: 8080
+  udp: true
+  password: k1dBOmOB4oqi7Ump37a1bQ
+  cipher: aes-256-gcm
+- name: ss-oZIoA69Q-82.38.31.10:8080
+  type: ss
+  server: 82.38.31.10
   port: 8080
   udp: true
   password: oZIoA69Q8yhcQV8ka3Pa3A
   cipher: aes-256-gcm
-- name: ss-RexnBgU7-141.164.45.187:7001
-  type: ss
-  server: 141.164.45.187
-  port: 7001
+- name: trojan-dh-Ws-Yo-185.137.157.140:443
+  type: trojan
+  server: 185.137.157.140
+  port: 443
   udp: true
-  password: RexnBgU7EV5ADxG
-  cipher: aes-256-gcm
-- name: ss-oZIoA69Q-82.38.31.16:8080
+  password: dh-Ws-YoJIgTYLZ-A5VljeduVse-vhDl7Q
+  network: tcp
+  skip-cert-verify: false
+  sni: 185.137.157.140
+  tls: true
+- name: ss-qwerREWQ-218.237.185.230:4652
   type: ss
-  server: 82.38.31.16
+  server: 218.237.185.230
+  port: 4652
+  udp: true
+  password: qwerREWQ@@
+  cipher: aes-256-gcm
+- name: ss-oZIoA69Q-82.38.31.35:8080
+  type: ss
+  server: 82.38.31.35
   port: 8080
   udp: true
   password: oZIoA69Q8yhcQV8ka3Pa3A
   cipher: aes-256-gcm
+- name: vmess-550e8400-57.151.100.27:10086
+  type: vmess
+  server: 57.151.100.27
+  port: 10086
+  udp: true
+  uuid: 550e8400-e29b-41d4-a716-446655440000
+  alterId: 0
+  cipher: auto
+  network: tcp
