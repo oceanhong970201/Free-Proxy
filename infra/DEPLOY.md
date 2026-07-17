@@ -1,198 +1,247 @@
-# Deploy — proxy-sub-aggregator
+# Worker / D1 / KV 部署手冊
 
-> 兩個元件：subconverter（Docker sidecar）+ Cloudflare Worker（D1 + KV + cron）。
-> 環境：Windows / Node 22。Worker 程式碼在 `src/worker/`。
+> 最後更新：2026-07-16
+> 儲存庫中的 URL、binding 與 resource ID 是設定資料，不是遠端部署完成證明。本手冊不宣稱目前遠端版本、schema、secret 或健康狀態；每次部署都必須執行最後的驗證步驟。
 
-## ✅ 實際部署狀態（2026-07-14 已完成）
+## 1. 元件與必要順序
 
-| 資源 | 值 |
-|---|---|
-| CF 帳號 ID | `96068336d8c04d47d2a4d6806026def8` |
-| workers.dev subdomain | `proxy-aggregator` |
-| Worker URL | `https://proxy-sub-aggregator.proxy-aggregator.workers.dev` |
-| D1 database | `nodes-db` (id `1b837756-1913-43e7-b727-2d5a23bb8a78`) — schema 已套用 |
-| KV namespace | `proxy-sub-aggregator-CACHE` (id `a8cc252082fc4736b5e9ce897cd33f37`) |
-| ADMIN_TOKEN secret | 已設（值存 `.admin_token.tmp`，gitignore） |
-| Cron trigger | `0 */2 * * *`（每 2h） |
-| Worker version | 最新 `8b5c4e66-...`（含 hash async fix） |
+核心服務包含：
 
-### 端點
-- `GET /health` → `{ok:true, ts}`
-- `GET /sub` → base64-joined v2ray 訂閱（KV 快取 60s）
-- `POST /admin/import` → base64 節點清單，header `X-Admin-Token`，回 `{imported:N}`
+1. Cloudflare Worker：`src/worker/sub-aggregator.ts`
+2. D1：節點與目前 snapshot 狀態
+3. KV：`/sub` render cache
+4. `ADMIN_TOKEN` Worker secret
 
-### 訂閱 URL（直接可用）
-```
-https://proxy-sub-aggregator.proxy-aggregator.workers.dev/sub
-```
-v2ray base64 訂閱，含 vmess/vless/trojan/ss/hysteria2/hy2。
+本機 `subconverter` sidecar 是可選工具，不是 Python typed emitters 或 Worker 的執行相依。
 
-### 重新倒入節點
-```bash
-cd C:\Users\win10\Documents\Free-Proxy
-python -c "
-import httpx, base64
-W='https://proxy-sub-aggregator.proxy-aggregator.workers.dev'
-ADMIN=open('.admin_token.tmp').read().strip()
-raw=open('output/v2ray-base64.txt',encoding='utf-8').read().strip()
-payload=base64.b64encode(base64.b64decode(raw)).decode()  # already base64
-# 上面是 no-op; 直接用 raw text:
-nodes=base64.b64decode(raw).decode().splitlines()
-payload=base64.b64encode(('\n'.join(nodes)).encode()).decode()
-r=httpx.post(W+'/admin/import', headers={'X-Admin-Token':ADMIN}, content=payload, timeout=120)
-print(r.status_code, r.text)
-"
-# 清 KV 快取讓 /sub 即時反映新節點:
-cd src/worker && npx wrangler kv key delete "sub-render" --namespace-id=a8cc252082fc4736b5e9ce897cd33f37
+部署 atomic snapshot Worker 前，D1 必須先具備新 schema：
+
+```text
+確認目標帳戶／D1／KV
+  -> 備份 D1
+  -> fresh DB：套 schema.sql
+     或
+     existing DB：依序且各只執行一次 0002、0003 migrations
+  -> 設定 ADMIN_TOKEN
+  -> typecheck + tests
+  -> deploy Worker
+  -> strict publish 一份 snapshot
+  -> 驗證 /health、/sub 與 snapshot counts
 ```
 
-### 重新部署 Worker（改碼後）
-```bash
-cd src/worker
-npx tsc --noEmit           # 型別檢查
-npx wrangler deploy        # 部署
-```
+**不可先部署新 Worker 再補 migration。** 新 Worker 會讀寫 `nodes.snapshot_id` 與 `import_state`；舊 D1 尚未 migration 時 import 與 health 會失敗。
 
+## 2. 前置檢查
 
-
-### D1 schema migration（download_speed 欄位）
-若 D1 是舊 schema 套的（沒 download_speed），部署後要 ALTER：
-```bash
-cd src/worker
-npx wrangler d1 execute nodes-db --remote --command="ALTER TABLE nodes ADD COLUMN download_speed REAL;"
-```
-若已存在會報 OperationalError，可忽略。
-
-### 已知修復
-- `handleImport` 的 `hash()` 是 async，原本 `stmt.bind(hash(uri))` 拿到 Promise 拋 Error 1101。改成 `await Promise.all(parsed.map(hash))` 預先算好。
-- `parser.py` clash YAML / sing-box JSON 來源的 `raw` 原本存 `json.dumps(dict)`（clash JSON），改用 `node_to_uri()` 重建 `vmess://` / `vless://` URI。
-
----
-
-## 0. 前置（首次部署才需要，已完成可跳過）
+以下命令以 PowerShell、專案根目錄為起點：
 
 ```powershell
-cd C:\Users\win10\Documents\Free-Proxy\src\worker
-npm install        # 安裝 wrangler / typescript / @cloudflare/workers-types
-npx wrangler login  # 瀏覽器登入 Cloudflare（首次）
+Set-Location C:\path\to\Free-Proxy\src\worker
+npm.cmd ci
+npx.cmd wrangler whoami
+npm.cmd run typecheck
+npm.cmd test
 ```
 
-## 1. subconverter Docker sidecar
+確認 `src/worker/wrangler.toml` 的 D1 與 KV binding 指向本次要部署的環境。若使用多環境，請顯式指定對應 Wrangler environment，不要依賴目前 shell 的偶然狀態。
 
-### 1.1 啟動
+## 3. D1：fresh database
+
+本節只適用於全新、尚未套過任何 schema 的 D1。
+
 ```powershell
-cd C:\Users\win10\Documents\Free-Proxy
+Set-Location C:\path\to\Free-Proxy\src\worker
+
+# 建立資源，將輸出的 ID 填入 wrangler.toml
+npx.cmd wrangler d1 create nodes-db
+npx.cmd wrangler kv namespace create CACHE
+
+# Fresh DB 只套完整 schema；不要再跑 0002/0003 migrations
+npx.cmd wrangler d1 execute nodes-db --remote --file=..\..\infra\d1\schema.sql
+
+# 驗證關鍵物件
+npx.cmd wrangler d1 execute nodes-db --remote --command="PRAGMA table_info(nodes);"
+npx.cmd wrangler d1 execute nodes-db --remote --command="SELECT name FROM sqlite_master WHERE type='table' AND name='import_state';"
+```
+
+預期 `nodes` 具有 `node_json`、`download_speed`、`snapshot_id`，且存在 `import_state` 表。
+
+## 4. D1：existing database migrations
+
+本節只適用於既有 D1。先確認選到正確帳戶與 database，再備份：
+
+```powershell
+Set-Location C:\path\to\Free-Proxy\src\worker
+$backup = Join-Path $env:TEMP ("nodes-db-before-atomic-migrations-" + (Get-Date -Format "yyyyMMdd-HHmmss") + ".sql")
+npx.cmd wrangler d1 export nodes-db --remote --output=$backup
+Write-Host "D1 backup: $backup"
+```
+
+在部署新 Worker **之前**，嚴格依序執行兩個 migration；只有前一個成功並完成查驗後才執行下一個：
+
+```powershell
+npx.cmd wrangler d1 execute nodes-db --remote --file=..\..\infra\d1\migrations\0002_atomic_snapshots.sql
+npx.cmd wrangler d1 execute nodes-db --remote --file=..\..\infra\d1\migrations\0003_full_node_model.sql
+```
+
+`0002_atomic_snapshots.sql` 必須一次性執行，內容包括：
+
+- `ALTER TABLE nodes ADD COLUMN snapshot_id TEXT`
+- snapshot／quality indexes
+- `import_state` 表
+
+`0003_full_node_model.sql` 接著補齊既有 DB 的完整節點欄位，包括 `method`、`security`、TLS/transport/Reality、`alter_id`、SSR、TUIC/Juicity 相關欄位與 authoritative `node_json`。
+
+兩個 migration 都不可重複執行；第二次執行會因欄位已存在而失敗。請在 deployment log 或 migration ledger 分別記錄 0002、0003 已完成。不要把「欄位已存在」錯誤一律忽略，因為同一檔案的後續 statement 可能未套用；應分別查驗：
+
+```powershell
+npx.cmd wrangler d1 execute nodes-db --remote --command="PRAGMA table_info(nodes);"
+npx.cmd wrangler d1 execute nodes-db --remote --command="SELECT name FROM sqlite_master WHERE type IN ('table','index') AND (name='import_state' OR name LIKE 'idx_nodes_%') ORDER BY name;"
+```
+
+至少確認 `nodes` 具有 `snapshot_id`、`alter_id`、`protocol`、`obfs`、`congestion_control` 與 `node_json`，並確認 `import_state` 及預期 indexes 均存在。
+
+Fresh DB 不執行本節的 0002/0003；fresh DB 使用上一節的完整 `schema.sql`。
+
+## 5. Worker secret 與 deploy
+
+為 `ADMIN_TOKEN` 產生強隨機值，並把同一值放入 publisher 執行環境。不要寫進 `wrangler.toml`：
+
+```powershell
+Set-Location C:\path\to\Free-Proxy\src\worker
+npx.cmd wrangler secret put ADMIN_TOKEN
+```
+
+D1 schema，或 existing DB 的 0002、0003 migrations，全數驗證成功後才部署：
+
+```powershell
+# package.json 的 predeploy 會再次執行 typecheck 與 tests
+npm.cmd run deploy
+```
+
+保留 deploy 輸出的 deployment/version ID 與 git commit SHA。遠端 deploy 是需要登入與網路的獨立動作；本機測試成功不代表此命令已執行。
+
+## 6. Canonical import：Python strict publisher
+
+推薦由 aggregator 建立 version 1 JSON snapshot，並嚴格核對 Worker 回應：
+
+```powershell
+Set-Location C:\path\to\Free-Proxy
+$env:WORKER_URL = "https://YOUR_WORKER.workers.dev"
+$env:ADMIN_TOKEN = "YOUR_ADMIN_TOKEN"
+python src\aggregator\cli.py publish --strict
+```
+
+`publish --strict` 只會選 `alive is True` 且達到 `config/quality.yaml` 下載速度下限的節點。沒有合格節點時命令失敗並保留遠端舊 snapshot，不會改用未驗證或較低門檻資料。
+
+Canonical request：
+
+```http
+POST /admin/import
+Content-Type: application/json
+X-Admin-Token: SECRET
+```
+
+```json
+{
+  "version": 1,
+  "snapshot_id": "TIMESTAMP-UNIQUE_ID",
+  "expected_count": 1,
+  "nodes": [
+    {
+      "uri": "PROXY_URI",
+      "alive": true,
+      "latency_ms": 100,
+      "download_speed": 12.5,
+      "model": {
+        "proto": "vless",
+        "host": "edge.example",
+        "port": 443,
+        "uuid": "00000000-0000-0000-0000-000000000001",
+        "raw": "PROXY_URI"
+      }
+    }
+  ]
+}
+```
+
+`model` 是完整 ProxyNode 物件（範例只列主要欄位），且 `model.raw` 必須與外層 `uri` 完全相同。Worker 會把完整 JSON 寫入 D1 `node_json`，並同步 schema 中的 scalar 欄位。成功回應必須同時包含 `ok:true`、`complete:true`、`model_persisted:true`、相同的 `snapshot_id`，且 `imported`、`expected` 均等於送出的 `expected_count`。只檢查 HTTP 2xx 不足以判定成功。
+
+## 7. 部署後驗證
+
+Fresh D1 在第一份完整 snapshot 匯入前，`/health` 回 503 是預期行為。完成 strict publish 後執行：
+
+```powershell
+$base = "https://YOUR_WORKER.workers.dev"
+$health = Invoke-RestMethod "$base/health"
+$health | ConvertTo-Json -Depth 8
+
+if (-not $health.ok) { throw "Worker health ok=false" }
+if ($health.snapshot.expected -ne $health.snapshot.imported) { throw "snapshot import count mismatch" }
+if ($health.nodes.alive -ne $health.snapshot.expected) { throw "active node count mismatch" }
+if ($health.nodes.current_snapshot -ne $health.snapshot.expected) { throw "current snapshot count mismatch" }
+
+Invoke-WebRequest "$base/sub" -OutFile (Join-Path $env:TEMP "worker-sub.txt")
+Invoke-WebRequest "$base/sub?format=clash" -OutFile (Join-Path $env:TEMP "worker-clash.yaml")
+```
+
+健康條件包含：
+
+- D1 query 成功；
+- KV probe 成功；
+- `import_state` 完整；
+- active rows 全部屬於目前 `snapshot_id`；
+- snapshot 未超過 `HEALTH_MAX_AGE_SECONDS`。
+
+健康檢查應同時要求 HTTP 200 與 JSON `ok:true`。HTTP body 可讀但 `ok:false`、counts 不一致或 snapshot 過舊都屬於失敗。
+
+## 8. 本機 Worker 開發
+
+本機 D1 與遠端 D1 分開初始化：
+
+```powershell
+Set-Location C:\path\to\Free-Proxy\src\worker
+npx.cmd wrangler d1 execute nodes-db --local --file=..\..\infra\d1\schema.sql
+$env:ADMIN_TOKEN = "dev-only-token"
+npm.cmd run dev
+```
+
+本機測試用資料庫使用完整 `schema.sql`；不要對 fresh local DB 另外執行 0002/0003 migrations。
+
+## 9. 可選 subconverter sidecar
+
+只有在需要額外手動轉換時才啟動：
+
+```powershell
+Set-Location C:\path\to\Free-Proxy
 docker compose -f infra\docker-compose.yml up -d
+curl http://127.0.0.1:25500/version
 ```
 
-### 1.2 驗證
-```powershell
-curl http://localhost:25500/version
-# 預期回傳 subconverter 版本字串
-```
+啟用前確認 compose 將 port 綁在 `127.0.0.1`，且 image 使用經審查的固定版本或 digest，而不是浮動 `latest`。不要把帶 token 的私人訂閱 URL 送到第三方 converter。
 
-### 1.3 訂閱轉換測試
-subconverter 接受 base64 編碼的訂閱 URL 作為 `url` 參數：
+停止：
 
-```powershell
-# 假設 Worker 已部署且 /sub 回傳 base64 節點清單
-$raw = (Invoke-WebRequest "https://<worker>.workers.dev/sub").Content
-$targetUrl = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("https://<worker>.workers.dev/sub"))
-# 透過 subconverter 轉成 clash YAML
-curl "http://localhost:25500/sub?target=clash&url=$targetUrl"
-```
-
-### 1.4 停止
 ```powershell
 docker compose -f infra\docker-compose.yml down
 ```
 
-> 注意：勿用公開 subconverter backend（會洩訂閱 URL 給第三方）。自架 Docker sidecar。
+## 10. Rollback 與事故處理
 
-## 2. Cloudflare Worker 部署
+- Worker：保留上一版 deployment ID；新版本健康檢查失敗時，使用 Cloudflare deployment rollback 功能回到已知版本。
+- D1：0002/0003 是 additive migrations，沒有自動 down migration。保留部署前 export，先停止新 import，再依事故程序於獨立資料庫驗證 restore。
+- Snapshot：失敗的 import 不應停用目前可用 snapshot；若 import 後 cache invalidation 失敗，先查 D1 `import_state` 與 counts，再決定是否重試 cache 清除。
+- Secret：疑似洩漏時先更新 Worker secret 與 publisher secret，再重新發布；不要把 token 貼進 issue 或 log。
 
-### 2.1 建立 D1 資料庫
-```powershell
-npx wrangler d1 create nodes-db
-# 把回傳的 database_id 填進 src\worker\wrangler.toml 的 [[d1_databases]] database_id
-```
+## 11. 發布紀錄
 
-### 2.2 建立 KV namespace
-```powershell
-npx wrangler kv namespace create CACHE
-# 把回傳的 id 填進 src\worker\wrangler.toml 的 [[kv_namespaces]] id
-```
+每次 production deployment 至少記錄：
 
-### 2.3 套用 schema
-```powershell
-cd C:\Users\win10\Documents\Free-Proxy
-npx wrangler d1 execute nodes-db --file=infra\d1\schema.sql --remote
-```
-（本地離線測試可加 `--local`）
+- git commit SHA；
+- Worker deployment/version ID；
+- D1 database name/id 與 migration 狀態；
+- typecheck/test 結果；
+- strict publisher 的 `snapshot_id` 與 count；
+- `/health` JSON 驗證時間與結果。
 
-### 2.4 設定 admin token secret
-```powershell
-cd src\worker
-npx wrangler secret put ADMIN_TOKEN
-# 於提示輸入一個強隨機字串，記住它（之後 POST /admin/import 帶 X-Admin-Token）
-```
-> 勿用 vars（會寫進 toml 並曝光）；用 secret。
-
-### 2.5 部署
-```powershell
-npx wrangler deploy
-```
-部署後記下 `https://proxy-sub-aggregator.<subdomain>.workers.dev`。
-
-## 3. 驗證
-
-```powershell
-# health
-curl https://<worker>.workers.dev/health
-# {"ok":true,"ts":...}
-
-# import（base64 過長建議用檔案 body）
-$nodes = "vmess://...`nvless://..."   # 換行分隔的 URI 清單
-$b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($nodes))
-curl -X POST https://<worker>.workers.dev/admin/import `
-  -H "X-Admin-Token: <你的 token>" `
-  -H "Content-Type: text/plain" `
-  -d $b64
-# {"imported":N}
-
-# /sub（base64 附件下載）
-curl -O -J https://<worker>.workers.dev/sub
-```
-
-### 預期行為
-- `POST /admin/import` 錯 token → 401。
-- `GET /sub` 連打第二次，D1 query 計數不增（KV 60s 快取命中）。
-- `crons = ["0 */2 * * *"]` 每 2 小時觸發 `scheduled` handler（stub log）。
-
-## 4. 本地 `wrangler dev` 測試
-
-```powershell
-cd src\worker
-npx wrangler d1 create nodes-db --local   # 第一次：建立本地 D1
-npx wrangler d1 execute nodes-db --file=..\..\infra\d1\schema.sql --local
-npx wrangler kv namespace create CACHE --local
-$env:ADMIN_TOKEN = "dev-test-token"
-npx wrangler dev --local
-```
-
-開另一個視窗測試：
-```powershell
-curl http://localhost:8787/health
-$b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("vmess://demo`nvless://demo2"))
-curl -X POST http://localhost:8787/admin/import -H "X-Admin-Token: dev-test-token" -H "Content-Type: text/plain" -d $b64
-curl http://localhost:8787/sub
-```
-
-## 5. 型別檢查
-
-```powershell
-cd src\worker
-npm install
-npx tsc --noEmit
-```
-預期：零錯誤（依賴 `@cloudflare/workers-types` 提供的 `D1Database` / `KVNamespace` / `ExecutionContext` 型別）。
+沒有這些證據時，文件只描述預期流程，不應標示遠端部署為完成。

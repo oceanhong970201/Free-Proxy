@@ -76,12 +76,12 @@
       "https://cdn.jsdelivr.net/gh/mfuu/v2ray@master/clash.yaml"
     ],
     "format": "clash",
-    "enabled": true,
+    "enabled": false,
     "tier": 1,
     "last_fetch": 1784114459,
     "last_count": null,
-    "status": "ok",
-    "note": "Verified 2026-07-15: ~123 clash nodes (also has v2ray base64 at /master/v2ray)."
+    "status": "invalid-yaml",
+    "note": "Disabled 2026-07-16: upstream clash.yaml is syntactically invalid (unescaped quotes in flow mappings). Re-enable only after parser validation passes."
   },
   {
     "id": "aliilapro-v2rayng",
@@ -192,5 +192,47 @@
     "last_fetch": 1784023664,
     "last_count": null,
     "status": "dropped"
+  },
+  {
+    "id": "jafar-main",
+    "url": "https://raw.githubusercontent.com/jafarm83/ConfigV2Ray/main/jafar.txt",
+    "mirrors": [
+      "https://cdn.jsdelivr.net/gh/jafarm83/ConfigV2Ray@main/jafar.txt"
+    ],
+    "format": "raw",
+    "enabled": false,
+    "tier": 3,
+    "last_fetch": 1784225835,
+    "last_count": 9,
+    "status": "canary-validated",
+    "note": "Disabled canary validated 2026-07-17 on primary: 9 parsed/9 unique; Tier 1 8/9 (median 385.5 ms); Tier 2 3/8; published overlap 0. Mirror semantic intersection 0 (Jaccard 0.000); keep disabled."
+  },
+  {
+    "id": "roosterkid-v2ray",
+    "url": "https://raw.githubusercontent.com/roosterkid/openproxylist/main/V2RAY_RAW.txt",
+    "mirrors": [
+      "https://cdn.jsdelivr.net/gh/roosterkid/openproxylist@main/V2RAY_RAW.txt"
+    ],
+    "format": "raw",
+    "enabled": false,
+    "tier": 3,
+    "last_fetch": 1784225835,
+    "last_count": 124,
+    "status": "canary-validated",
+    "note": "Disabled canary validated 2026-07-17 on primary: 124 parsed/122 unique; Tier 1 75/122 (median 336 ms); Tier 2 13/75; published overlap 5. Mirror Jaccard 0.155; keep disabled."
+  },
+  {
+    "id": "lm705-vair",
+    "url": "https://raw.githubusercontent.com/lm705/vair/main/vless_alive.txt",
+    "mirrors": [
+      "https://cdn.jsdelivr.net/gh/lm705/vair@main/vless_alive.txt"
+    ],
+    "format": "raw",
+    "enabled": false,
+    "tier": 3,
+    "last_fetch": 1784225835,
+    "last_count": 259,
+    "status": "canary-validated",
+    "note": "Disabled canary validated 2026-07-17 on primary: 259 parsed/200 unique; Tier 1 113/200 (median 656 ms); Tier 2 13/113; published overlap 0. Mirror Jaccard 0.485; keep disabled."
   }
 ]

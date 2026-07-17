@@ -8,7 +8,7 @@ Two modes:
   2. Self-org audit via trufflehog (`trufflehog github --org=<org>`) and a
      local `gitleaks dir <ROOT>` sweep with custom proxy-secret rules. Hits on
      the self org that contain vmess:// / vless:// URIs are appended to
-     state/gray_nodes.jsonl (one URI per line).
+      state/gray_nodes.jsonl as disabled, review-required JSON records.
 
 Missing GITHUB_TOKEN -> code search skipped + logged (no crash).
 Missing gitleaks/trufflehog binaries -> skipped + logged.
@@ -23,6 +23,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -80,6 +81,7 @@ def _gh_search_one(query: str, fetch_raw: bool) -> list[dict]:
     hits: list[dict] = []
     page = 1
     total_collected = 0
+    rate_retries = 0
     while total_collected < CODE_SEARCH_MAX_RESULTS:
         try:
             proc = subprocess.run(
@@ -96,8 +98,8 @@ def _gh_search_one(query: str, fetch_raw: bool) -> list[dict]:
                     "-f",
                     f"page={page}",
                     "--jq",
-                    f"[.items[] | {{repo:.repository.full_name, path:.path, html_url:.html_url}}] | "
-                    f".[]",
+                    "[.items[] | {repo:.repository.full_name, path:.path, "
+                    "html_url:.html_url}] | .[]",
                 ],
                 capture_output=True,
                 text=True,
@@ -110,12 +112,18 @@ def _gh_search_one(query: str, fetch_raw: bool) -> list[dict]:
         if proc.returncode != 0:
             stderr = (proc.stderr or "").strip()
             if "rate limit" in stderr.lower() or "403" in stderr:
+                if rate_retries >= 3:
+                    _log("  gh rate-limit retry budget exhausted.")
+                    break
+                rate_retries += 1
                 _log("  gh rate-limited — pausing 60s.")
                 time.sleep(60)
                 continue
             _log(f"  gh api rc={proc.returncode}: {stderr[:200]}")
             break
+        rate_retries = 0
         # gh --jq emits one JSON object per line for the .[] pattern
+        page_hits = 0
         for line in (proc.stdout or "").splitlines():
             line = line.strip()
             if not line:
@@ -125,12 +133,13 @@ def _gh_search_one(query: str, fetch_raw: bool) -> list[dict]:
             except Exception:  # noqa: BLE001
                 continue
             hits.append({**obj, "query": query})
+            page_hits += 1
             if not fetch_raw:
                 _log(
                     f"  third-party hit (raw NOT fetched): {obj.get('repo')}:{obj.get('path')}"
                 )
             total_collected += 1
-        if total_collected < CODE_SEARCH_PER_PAGE:
+        if page_hits < CODE_SEARCH_PER_PAGE:
             break
         page += 1
         time.sleep(CODE_SEARCH_RATE_GAP)
@@ -154,6 +163,7 @@ def _github_search_one(
     }
     page = 1
     total_collected = 0
+    retries = 0
     while total_collected < CODE_SEARCH_MAX_RESULTS:
         params = {"q": query, "per_page": CODE_SEARCH_PER_PAGE, "page": page}
         try:
@@ -161,15 +171,23 @@ def _github_search_one(
                 CODE_SEARCH_BASE, params=params, headers=headers, timeout=20.0
             )
         except Exception as e:  # noqa: BLE001
-            _log(f"  query request failed: {type(e).__name__}: {e}")
-            break
+            if retries >= 3:
+                _log(f"  query request failed: {type(e).__name__}; retries exhausted")
+                break
+            retries += 1
+            time.sleep(min(2**retries, 30))
+            continue
 
         # Rate limit / abuse handling.
         if r.status_code == 403 or r.status_code == 429:
+            if retries >= 3:
+                _log("  rate-limit retry budget exhausted.")
+                break
+            retries += 1
             ra = r.headers.get("Retry-After")
             if ra:
                 try:
-                    wait = int(ra) + 1
+                    wait = min(max(int(ra) + 1, 1), 300)
                 except ValueError:
                     wait = 60
                 _log(f"  rate-limited (Retry-After={wait}s) — backing off.")
@@ -179,9 +197,17 @@ def _github_search_one(
             _log("  secondary rate limit — pausing 60s.")
             time.sleep(60)
             continue
+        if 500 <= r.status_code < 600:
+            if retries >= 3:
+                _log(f"  query HTTP {r.status_code}; retries exhausted")
+                break
+            retries += 1
+            time.sleep(min(2**retries, 30))
+            continue
         if r.status_code != 200:
-            _log(f"  query HTTP {r.status_code}: {r.text[:200]}")
+            _log(f"  query HTTP {r.status_code}")
             break
+        retries = 0
 
         try:
             data = r.json()
@@ -189,7 +215,13 @@ def _github_search_one(
             _log("  non-JSON response — stop.")
             break
 
+        if not isinstance(data, dict):
+            _log("  JSON response had an invalid shape — stop.")
+            break
         items = data.get("items", []) or []
+        if not isinstance(items, list):
+            _log("  JSON response items had an invalid shape — stop.")
+            break
         if not items:
             break
         for it in items:
@@ -204,8 +236,15 @@ def _github_search_one(
             if not fetch_raw:
                 _log(f"  third-party hit (raw NOT fetched): {repo}:{path}")
         total_collected += len(items)
-        # GitHub /search/code caps total_count at 1000.
-        if total_collected >= (data.get("total_count", 0) or 0):
+        # GitHub /search/code caps total_count at 1000. Some compatible API
+        # responses omit total_count, in which case short-page pagination wins.
+        try:
+            advertised_total = min(
+                int(data.get("total_count")), CODE_SEARCH_MAX_RESULTS
+            )
+        except (TypeError, ValueError):
+            advertised_total = CODE_SEARCH_MAX_RESULTS
+        if total_collected >= advertised_total:
             break
         if len(items) < CODE_SEARCH_PER_PAGE:
             break
@@ -312,61 +351,58 @@ def _run_gitleaks_dir(scan_root: Path) -> list[dict]:
     if not GITLEAKS_RULES.exists():
         _log(f"gitleaks rules missing: {GITLEAKS_RULES} — skipping.")
         return []
-    cmd = [
-        binary,
-        "dir",
-        str(scan_root),
-        "--config",
-        str(GITLEAKS_RULES),
-        "--report-format",
-        "json",
-        "--no-color",
-    ]
-    _log(f"running gitleaks: {' '.join(cmd)}")
-    try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=300,
-            encoding="utf-8",
-            errors="replace",
-        )
-    except subprocess.TimeoutExpired:
-        _log("gitleaks timed out (300s) — partial.")
-        return []
-    except Exception as e:  # noqa: BLE001
-        _log(f"gitleaks exec failed: {type(e).__name__}: {e}")
-        return []
-    # gitleaks emits findings JSON either on stdout (--report-path -) or stderr.
-    out = (proc.stdout or "") + "\n" + (proc.stderr or "")
-    findings: list[dict] = []
-    # gitleaks json report is typically a JSON array; parse defensively.
-    text = out.strip()
-    if text.startswith("[") or text.startswith("{"):
+    with tempfile.TemporaryDirectory(prefix="gitleaks-") as temp_dir:
+        report_path = Path(temp_dir) / "findings.json"
+        cmd = [
+            binary,
+            "dir",
+            str(scan_root),
+            "--config",
+            str(GITLEAKS_RULES),
+            "--report-format",
+            "json",
+            "--report-path",
+            str(report_path),
+            "--no-color",
+        ]
+        _log(f"running gitleaks: {' '.join(cmd)}")
         try:
-            parsed = json.loads(text)
-            if isinstance(parsed, list):
-                findings = parsed
-            elif isinstance(parsed, dict):
-                findings = [parsed]
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=300,
+                encoding="utf-8",
+                errors="replace",
+            )
+        except subprocess.TimeoutExpired:
+            _log("gitleaks timed out (300s) — no complete report.")
+            return []
+        except Exception as e:  # noqa: BLE001
+            _log(f"gitleaks exec failed: {type(e).__name__}")
+            return []
+
+        # Exit 1 means findings were detected. Other non-zero codes are tool
+        # errors, but parse an existing complete report before returning.
+        if proc.returncode not in (0, 1):
+            _log(f"gitleaks exited with status {proc.returncode}.")
+            return []
+        if not report_path.exists():
+            _log("gitleaks did not produce its JSON report.")
+            return []
+        try:
+            parsed = json.loads(report_path.read_text(encoding="utf-8"))
         except Exception:  # noqa: BLE001
-            # Fall back to line-by-line JSON.
-            for line in text.splitlines():
-                try:
-                    findings.append(json.loads(line))
-                except Exception:  # noqa: BLE001
-                    pass
-    else:
-        for line in text.splitlines():
-            line = line.strip()
-            if line.startswith("{"):
-                try:
-                    findings.append(json.loads(line))
-                except Exception:  # noqa: BLE001
-                    pass
-    _log(f"gitleaks: {len(findings)} findings.")
-    return findings
+            _log("gitleaks report was not valid JSON.")
+            return []
+        if isinstance(parsed, list):
+            findings = [item for item in parsed if isinstance(item, dict)]
+        elif isinstance(parsed, dict):
+            findings = [parsed]
+        else:
+            findings = []
+        _log(f"gitleaks: {len(findings)} findings.")
+        return findings
 
 
 def _extract_uris_from_findings(findings: list[dict]) -> list[str]:
@@ -406,18 +442,42 @@ def _extract_uris_from_findings(findings: list[dict]) -> list[str]:
 
 
 def _append_uris(uris: list[str]) -> int:
-    """Append URIs to state/gray_nodes.jsonl (one URI per line). Dedup in-file."""
+    """Append self-audit findings as fail-closed, review-required records."""
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     existing: set[str] = set()
     if GRAY_NODES_FILE.exists():
         with GRAY_NODES_FILE.open("r", encoding="utf-8") as fh:
             for line in fh:
-                existing.add(line.strip())
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                    uri = record.get("raw") or record.get("uri")
+                except Exception:  # noqa: BLE001
+                    uri = line
+                if isinstance(uri, str):
+                    existing.add(uri)
     new = [u for u in uris if u and u not in existing]
     GRAY_NODES_FILE.parent.mkdir(parents=True, exist_ok=True)
     with GRAY_NODES_FILE.open("a", encoding="utf-8") as fh:
         for u in new:
-            fh.write(u + "\n")
+            fh.write(
+                json.dumps(
+                    {
+                        "raw": u,
+                        "uri": u,
+                        "tier": "deep-gray",
+                        "source_channel": "github-self-audit",
+                        "enabled": False,
+                        "watermark_suspect": True,
+                        "review_status": "pending",
+                        "ts": int(time.time()),
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
     return len(new)
 
 

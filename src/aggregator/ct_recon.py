@@ -22,11 +22,14 @@ Public API:
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import re
 import time
+from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import quote
 
 import httpx
 import yaml
@@ -45,11 +48,31 @@ STATE = ROOT / "state"
 OUT = STATE / "recon_intel.jsonl"
 
 CRTSH_URL = "https://crt.sh/?q={domain}&output=json"
-SECURITYTRAILS_URL = "https://api.securitytrails.com/v1/history/{domain}"
+SECURITYTRAILS_URL = "https://api.securitytrails.com/v1/history/{domain}/dns/a"
 
 # crt.sh `name_value` may contain multiple newline-separated SANs and a
 # leading wildcard; split + clean into individual hostnames.
 _HOST_RE = re.compile(r"^[a-zA-Z0-9_*-][a-zA-Z0-9.*-]+$")
+
+
+def _to_epoch(value: object) -> int:
+    """Normalize API integer or ISO-8601 timestamps to epoch seconds."""
+    if isinstance(value, (int, float)):
+        numeric = int(value)
+        return numeric // 1000 if numeric > 10_000_000_000 else numeric
+    text = str(value or "").strip()
+    if text.isdigit():
+        numeric = int(text)
+        return numeric // 1000 if numeric > 10_000_000_000 else numeric
+    if text:
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return int(parsed.timestamp())
+        except ValueError:
+            pass
+    return int(time.time())
 
 
 def _load_config() -> dict:
@@ -81,6 +104,7 @@ def _expand_name_value(name_value: str, domain: str) -> list[str]:
     Expand to a deduped list of bare hostnames (wildcards stripped)."""
     out: list[str] = []
     seen: set[str] = set()
+    parent = domain.strip().lower().removeprefix("*.").rstrip(".")
     for part in (name_value or "").splitlines():
         part = part.strip().lower()
         if not part or not _HOST_RE.match(part):
@@ -88,6 +112,10 @@ def _expand_name_value(name_value: str, domain: str) -> list[str]:
         # drop wildcard prefix
         if part.startswith("*."):
             part = part[2:]
+        # A certificate returned for the query can contain unrelated SANs.
+        # Keep only the watched parent and its actual subdomains.
+        if part != parent and not part.endswith(f".{parent}"):
+            continue
         if not part or part in seen:
             continue
         seen.add(part)
@@ -109,10 +137,10 @@ def query_crtsh(domain: str) -> list[dict]:
     records: list[dict] = []
     try:
         r = httpx.get(
-            CRTSH_URL.format(domain=domain),
+            CRTSH_URL.format(domain=quote(domain, safe=".*")),
             headers={"User-Agent": "free-proxy-aggregator/1.0"},
             timeout=45.0,
-            follow_redirects=True,
+            follow_redirects=False,
         )
     except Exception:
         return []
@@ -131,10 +159,7 @@ def query_crtsh(domain: str) -> list[dict]:
             continue
         nv = cert.get("name_value") or ""
         ts = cert.get("entry_timestamp")
-        try:
-            first_seen = int(ts) if ts is not None else int(time.time())
-        except (TypeError, ValueError):
-            first_seen = int(time.time())
+        first_seen = _to_epoch(ts)
         for sni in _expand_name_value(str(nv), domain):
             key = (domain, sni)
             if key in seen_sni:
@@ -171,10 +196,11 @@ def query_securitytrails(domain: str) -> list[dict]:
 
     try:
         r = httpx.get(
-            SECURITYTRAILS_URL.format(domain=domain),
-            headers={"APIKEY": api_key},
+            SECURITYTRAILS_URL.format(domain=quote(domain, safe="")),
+            headers={"APIKEY": api_key, "Accept": "application/json"},
             timeout=45.0,
-            follow_redirects=True,
+            # Never forward the APIKEY header to a redirect destination.
+            follow_redirects=False,
         )
     except Exception:
         return []
@@ -187,35 +213,80 @@ def query_securitytrails(domain: str) -> list[dict]:
     if not isinstance(data, dict):
         return []
     records: list[dict] = []
-    seen: set[tuple[str, str, str]] = set()
+    seen: set[tuple[str, str, int]] = set()
     for rec in data.get("records") or []:
         if not isinstance(rec, dict):
             continue
-        ip = rec.get("ip") or rec.get("value")
-        for entry in rec.get("organizations") or []:
-            if not isinstance(entry, dict):
+        values = rec.get("values") or []
+        ips: list[str] = []
+        direct = rec.get("ip") or rec.get("value")
+        if direct:
+            ips.append(str(direct))
+        for value in values:
+            if isinstance(value, dict):
+                ip = value.get("ip") or value.get("value")
+            else:
+                ip = value
+            if ip:
+                ips.append(str(ip))
+        first_seen = _to_epoch(rec.get("first_seen"))
+        for ip in ips:
+            try:
+                # SecurityTrails DNS/A history should never produce hostnames.
+                ip = str(ipaddress.ip_address(ip))
+            except ValueError:
                 continue
-        seen_flag_key = (domain, str(ip), str(rec.get("first_seen") or ""))
-        if not ip:
+            key = (domain, ip, first_seen)
+            if key in seen:
+                continue
+            seen.add(key)
+            records.append(
+                {
+                    "domain": domain,
+                    "subdomain": domain,
+                    "ip": ip,
+                    "sni": domain,
+                    "source": "securitytrails",
+                    "first_seen": first_seen,
+                }
+            )
+    return records
+
+
+def _record_key(record: dict) -> tuple[object, ...] | None:
+    """Return the stable identity used to merge prior and fresh intelligence."""
+    required = ("domain", "subdomain", "sni", "source")
+    if not all(
+        isinstance(record.get(field), str) and record[field] for field in required
+    ):
+        return None
+    return (
+        record["domain"],
+        record["subdomain"],
+        record.get("ip"),
+        record["sni"],
+        record["source"],
+    )
+
+
+def _load_existing_records() -> list[dict]:
+    """Read valid prior rows; a truncated/corrupt line cannot abort a run."""
+    if not OUT.exists():
+        return []
+    records: list[dict] = []
+    try:
+        lines = OUT.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return []
+    for line in lines:
+        if not line.strip():
             continue
         try:
-            first_seen = int(rec.get("first_seen") or 0) or int(time.time())
-        except (TypeError, ValueError):
-            first_seen = int(time.time())
-        key = (domain, str(ip), str(first_seen))
-        if key in seen:
+            record = json.loads(line)
+        except Exception:
             continue
-        seen.add(key)
-        records.append(
-            {
-                "domain": domain,
-                "subdomain": domain,
-                "ip": str(ip),
-                "sni": domain,
-                "source": "securitytrails",
-                "first_seen": first_seen,
-            }
-        )
+        if isinstance(record, dict) and _record_key(record) is not None:
+            records.append(record)
     return records
 
 
@@ -233,7 +304,7 @@ def run() -> dict:
 
     all_records: list[dict] = []
     per_domain: dict[str, dict] = {}
-    seen: set[tuple] = set()
+    seen: dict[tuple, int] = {}
 
     for d in domains:
         crt = query_crtsh(d)
@@ -249,8 +320,13 @@ def run() -> dict:
                 rec["source"],
             )
             if key in seen:
+                idx = seen[key]
+                all_records[idx]["first_seen"] = min(
+                    _to_epoch(all_records[idx].get("first_seen")),
+                    _to_epoch(rec.get("first_seen")),
+                )
                 continue
-            seen.add(key)
+            seen[key] = len(all_records)
             all_records.append(rec)
             count += 1
         per_domain[d] = {
@@ -260,15 +336,57 @@ def run() -> dict:
         }
 
     STATE.mkdir(parents=True, exist_ok=True)
-    with OUT.open("w", encoding="utf-8") as f:
-        for rec in all_records:
+    preserve_existing = cfg.get("preserve_existing", True) is not False
+    previous = _load_existing_records() if preserve_existing else []
+    if not all_records and OUT.exists() and preserve_existing:
+        return {
+            "watch_domains": domains,
+            "total_records": len(previous),
+            "records_written": 0,
+            "new_records": 0,
+            "per_domain": per_domain,
+            "path": str(OUT),
+            "preserved_previous": True,
+        }
+
+    # CT and passive-DNS calls can fail independently. Merge with the last
+    # successful snapshot so a partial outage never erases prior intelligence.
+    merged: dict[tuple[object, ...], dict] = {}
+    previous_keys: set[tuple[object, ...]] = set()
+    for record in previous:
+        key = _record_key(record)
+        if key is not None:
+            previous_keys.add(key)
+            merged[key] = record
+    for record in all_records:
+        key = _record_key(record)
+        if key is None:
+            continue
+        old = merged.get(key)
+        if old is not None:
+            # Preserve the earliest observation when APIs revise their window.
+            record = dict(record)
+            record["first_seen"] = min(
+                _to_epoch(old.get("first_seen")),
+                _to_epoch(record.get("first_seen")),
+            )
+        merged[key] = record
+    final_records = list(merged.values())
+
+    tmp = OUT.with_suffix(OUT.suffix + ".tmp")
+    with tmp.open("w", encoding="utf-8") as f:
+        for rec in final_records:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    tmp.replace(OUT)
 
     return {
         "watch_domains": domains,
-        "total_records": len(all_records),
+        "total_records": len(final_records),
+        "records_written": len(final_records),
+        "new_records": sum(1 for key in merged if key not in previous_keys),
         "per_domain": per_domain,
         "path": str(OUT),
+        "preserved_previous": bool(previous),
     }
 
 

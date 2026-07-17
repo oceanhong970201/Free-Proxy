@@ -1,0 +1,15 @@
+worker_url: https://proxy-sub-aggregator.proxy-aggregator.workers.dev
+pipeline_status_url: https://raw.githubusercontent.com/oceanhong970201/Free-Proxy/master/output/pipeline-status.json
+refresh_seconds: 30
+remote_timeout_seconds: 8
+pipeline_status_timeout_seconds: 5
+pipeline_status_cache_seconds: 60
+pipeline_status_stale_seconds: 3600
+
+ip_checker:
+  timeout_seconds: 18
+  concurrency: 4
+  cache_seconds: 300
+  purity_timeout_seconds: 8
+  purity_cache_seconds: 86400
+  purity_provider_concurrency: 2

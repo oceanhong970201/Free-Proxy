@@ -1,40 +1,28 @@
 name: tg-recon
 
-# Stage 18 — A5 Telegram underground market recon (web-preview + honeytrap
-# triage). Runs on GitHub Actions runner because the local dev machine sits
-# behind the GFW and cannot resolve t.me (getaddrinfo failed). The runner is
-# outside the wall and can reach t.me/s/<channel> public static mirrors.
-#
-# Flow:
-#   1. tg-recon     — scrape channels, honeytrap-triage, append
-#                     state/gray_nodes.jsonl
-#   2. publish-resin — attempted from CI but resin runs on localhost:2260 in
-#                     the local Docker, so it is expected to fail from the
-#                     runner; continue-on-error. gray_nodes.jsonl is committed
-#                     back to the repo, then locally `git pull` + publish-resin
-#                     pours it into resin.
-#   3. Commit        — push gray_nodes.jsonl back to the repo.
-
 on:
   schedule:
-    - cron: '23 */6 * * *'   # every 6 hours at :23 (off-round-minute)
+    - cron: '23 */6 * * *'
   workflow_dispatch:
 
 permissions:
   contents: write
 
 concurrency:
-  group: tg-recon
+  group: free-proxy-publish-production
   cancel-in-progress: false
 
 jobs:
   tg-recon:
+    if: github.ref_name == github.event.repository.default_branch
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout # zizmor: ignore[artipacked] This job must commit and push the gray-node snapshot.
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      - uses: actions/setup-python@v5
+      - name: Setup Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: '3.12'
 
@@ -44,18 +32,26 @@ jobs:
       - name: TG web-preview recon
         run: python src/aggregator/cli.py tg-recon
 
-      - name: Publish gray nodes to resin (if any)
-        run: python src/aggregator/cli.py publish-resin
-        env:
-          RESIN_URL: ${{ secrets.RESIN_URL || 'http://localhost:2260' }}
-          RESIN_ADMIN_TOKEN: ${{ secrets.RESIN_ADMIN_TOKEN }}
-        continue-on-error: true   # resin runs on localhost Docker — not reachable from CI runner
+      - name: Verify persisted result
+        run: test -s state/gray_nodes.jsonl
 
-      - name: Commit gray_nodes.jsonl
+      - name: Upload gray-node snapshot
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: gray-nodes-${{ github.run_id }}
+          path: state/gray_nodes.jsonl
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Commit gray-node snapshot
         run: |
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add state/gray_nodes.jsonl 2>/dev/null || true
+          git add -f state/gray_nodes.jsonl
           git diff --staged --quiet || git commit -m "tg-recon $(date -u +'%Y-%m-%d %H:%M')"
-          git push
-        continue-on-error: true
+          git pull --rebase --autostash
+          if ! git push; then
+            sleep 5
+            git pull --rebase --autostash
+            git push
+          fi

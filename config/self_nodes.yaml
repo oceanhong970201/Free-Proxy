@@ -10,29 +10,30 @@
 #
 # Supported proto values: vless | vmess | trojan | ss | tuic | hysteria2
 #
-# vless example (with REALITY/xtls-rprx-vision flow over ws+TLS):
-nodes:
-  - proto: vless
-    host: your-vps.example.com
-    port: 443
-    uuid: 00000000-0000-0000-0000-000000000000
-    sni: your-vps.example.com
-    net: ws
-    path: /vless
-    flow: xtls-rprx-vision
-    name: self-vless-01
-  - proto: vmess
-    host: another-vps.com
-    port: 443
-    uuid: 11111111-1111-1111-1111-111111111111
-    net: ws
-    path: /vmess
-    tls: true
-    sni: another-vps.com
-    name: self-vmess-01
-  - proto: trojan
-    host: trojan-vps.example.com
-    port: 443
-    password: your-trojan-password
-    sni: trojan-vps.example.com
-    name: self-trojan-01
+# Keep examples commented so a fresh checkout never publishes placeholders.
+# - proto: vless
+#   host: your-vps.example.com
+#   port: 443
+#   uuid: 00000000-0000-0000-0000-000000000000
+#   security: reality
+#   sni: your-vps.example.com
+#   flow: xtls-rprx-vision
+#   pbk: REPLACE_WITH_REALITY_PUBLIC_KEY
+#   sid: REPLACE_WITH_SHORT_ID
+#   name: self-vless-01
+# - proto: vmess
+#   host: another-vps.example.com
+#   port: 443
+#   uuid: 11111111-1111-1111-1111-111111111111
+#   net: ws
+#   path: /vmess
+#   tls: true
+#   sni: another-vps.example.com
+#   name: self-vmess-01
+# - proto: trojan
+#   host: trojan-vps.example.com
+#   port: 443
+#   password: REPLACE_WITH_PASSWORD
+#   sni: trojan-vps.example.com
+#   name: self-trojan-01
+nodes: []

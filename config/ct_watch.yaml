@@ -17,3 +17,7 @@ crtsh_concurrency: 5
 # Optional. If unset, SecurityTrails queries are skipped (no crash).
 # Set via env: $env:SECURITYTRAILS_API_KEY = "..."
 securitytrails_api_key: ${SECURITYTRAILS_API_KEY}
+
+# Fresh results are atomically merged with the prior snapshot so a partial
+# crt.sh/SecurityTrails outage cannot erase previously collected intelligence.
+preserve_existing: true

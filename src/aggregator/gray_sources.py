@@ -1,17 +1,15 @@
-"""Gray pipeline: Shodan/FOFA/Quake panel recon + open-register harvest.
+"""Gray pipeline: passive panel discovery with opt-in approved-target review.
 
-Stage 10 / A4 (gray). Uses Shodan, FOFA, Quake API to fingerprint V2Board /
-Xboard panels, then attempts auto-registration on open-register panels to grab
-trial subscribe URLs. Decode the subscribe content (base64 / URI lines) and
-append every URI into state/gray_nodes.jsonl (one URI per line).
+Stage 10 / A4 (gray). Uses Shodan, FOFA, and Quake APIs to discover V2Board /
+Xboard panel leads. Registration and subscription review run only for targets
+listed in ``panel_register.approved_targets`` while the gate is enabled. Any
+harvested URI is stored as a disabled, watermark-suspect JSON record.
 
 Design rules (see _GRAY_SPEC.md):
 - API keys come from env vars; a missing key logs a skip and continues — no crash.
-- No brute force. Panels that require email verification / invite codes are
-  skipped (logged) on first non-success response.
-- Disposable email, never a real account. email_code is "" (many free panels
-  don't verify email).
-- httpx with timeout=15, verify=False (self-signed certs are common).
+- No registration request is sent to a discovery result by default.
+- Intelligence API credentials travel only over verified TLS.
+- Subscribe destinations and redirects must resolve exclusively to public IPs.
 - Rate limit 1 req/s across the three recon APIs.
 
 Run directly:  python src/aggregator/gray_sources.py
@@ -21,12 +19,15 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import ipaddress
 import json
 import os
 import re
+import socket
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import httpx
 import yaml
@@ -36,6 +37,7 @@ CONFIG_FILE = ROOT / "config" / "gray_sources.yaml"
 STATE_DIR = ROOT / "state"
 GRAY_NODES_FILE = STATE_DIR / "gray_nodes.jsonl"
 LAST_RUN_FILE = STATE_DIR / "last-run.json"
+PANEL_LEADS_FILE = STATE_DIR / "gray_panel_leads.jsonl"
 
 # URI schemes we harvest from subscribe content.
 URI_RE = re.compile(
@@ -124,7 +126,8 @@ async def _shodan_search(client: httpx.AsyncClient, cfg: dict) -> list[dict]:
                         }
                     )
         except Exception as e:  # noqa: BLE001
-            _log(f"Shodan query failed: {type(e).__name__}: {e}")
+            # Request exceptions may embed the full URL (including API keys).
+            _log(f"Shodan query failed: {type(e).__name__}")
         await asyncio.sleep(cfg.get("rate_limit_seconds", 1.0))
     _log(f"Shodan: {len(hits)} raw hits across {len(queries)} queries.")
     return hits
@@ -149,7 +152,12 @@ async def _fofa_search(client: httpx.AsyncClient, cfg: dict) -> list[dict]:
             q_b64 = base64.b64encode(q.encode("utf-8")).decode("ascii")
             r = await client.get(
                 "https://fofa.info/api/v1/search/all",
-                params={"email": email, "key": key, "qbase64": q_b64},
+                params={
+                    "email": email,
+                    "key": key,
+                    "qbase64": q_b64,
+                    "fields": "host,ip,port",
+                },
                 timeout=cfg.get("request_timeout_seconds", 15.0),
             )
             if r.status_code == 429:
@@ -162,14 +170,23 @@ async def _fofa_search(client: httpx.AsyncClient, cfg: dict) -> list[dict]:
             data = r.json()
             for row in data.get("results", []) or []:
                 # FOFA returns "host" as "ip:port" or "domain:port"
-                host_field = row.get("host", "") if isinstance(row, dict) else ""
+                if isinstance(row, dict):
+                    host_field = str(row.get("host") or row.get("ip") or "")
+                    explicit_port = row.get("port")
+                elif isinstance(row, list):
+                    host_field = str(row[0]) if row else ""
+                    explicit_port = row[2] if len(row) > 2 else None
+                else:
+                    host_field, explicit_port = "", None
                 host, port = _split_host_port(host_field, default_port=443)
+                if str(explicit_port or "").isdigit():
+                    port = int(explicit_port)
                 if host:
                     hits.append(
                         {"host": host, "port": port, "html": "", "source": "fofa"}
                     )
         except Exception as e:  # noqa: BLE001
-            _log(f"FOFA query failed: {type(e).__name__}: {e}")
+            _log(f"FOFA query failed: {type(e).__name__}")
         await asyncio.sleep(cfg.get("rate_limit_seconds", 1.0))
     _log(f"FOFA: {len(hits)} raw hits across {len(queries)} queries.")
     return hits
@@ -215,7 +232,7 @@ async def _quake_search(client: httpx.AsyncClient, cfg: dict) -> list[dict]:
                         {"host": host, "port": port, "html": html, "source": "quake"}
                     )
         except Exception as e:  # noqa: BLE001
-            _log(f"Quake query failed: {type(e).__name__}: {e}")
+            _log(f"Quake query failed: {type(e).__name__}")
         await asyncio.sleep(cfg.get("rate_limit_seconds", 1.0))
     _log(f"Quake: {len(hits)} raw hits across {len(queries)} queries.")
     return hits
@@ -251,12 +268,137 @@ def _split_host_port(host_field: str, default_port: int) -> tuple[str, int]:
 
 def _panel_url(host: str, port: int) -> str:
     scheme = "https" if port in (443, 2053, 2083, 2087, 2096, 8443) else "http"
-    return f"{scheme}://{host}:{port}"
+    rendered_host = f"[{host}]" if ":" in host and not host.startswith("[") else host
+    return f"{scheme}://{rendered_host}:{port}"
 
 
 def _looks_like_panel(hit: dict) -> bool:
     html = (hit.get("html") or "").lower()
     return any(m.lower() in html for m in PANEL_MARKERS)
+
+
+def _redact_url(url: str) -> str:
+    """Render only an origin; subscription paths and query tokens are secret."""
+    try:
+        parsed = urlsplit(url)
+        host = parsed.hostname or "<invalid>"
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        port = f":{parsed.port}" if parsed.port else ""
+        return urlunsplit((parsed.scheme, f"{host}{port}", "/<redacted>", "", ""))
+    except Exception:
+        return "<redacted-url>"
+
+
+async def _validate_public_url(url: str) -> tuple[bool, str]:
+    """Resolve an HTTP(S) URL and reject every non-global destination."""
+    try:
+        parsed = urlsplit(url)
+        if parsed.scheme not in {"http", "https"}:
+            return False, "unsupported_scheme"
+        if parsed.username is not None or parsed.password is not None:
+            return False, "userinfo_forbidden"
+        host = parsed.hostname
+        if not host:
+            return False, "missing_host"
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    except (TypeError, ValueError):
+        return False, "malformed_url"
+
+    normalized = host.rstrip(".").lower()
+    if not (1 <= port <= 65535):
+        return False, "invalid_port"
+    if normalized == "localhost" or normalized.endswith(".localhost"):
+        return False, "localhost_forbidden"
+    try:
+        literal = ipaddress.ip_address(normalized)
+    except ValueError:
+        if "." not in normalized:
+            return False, "single_label_host_forbidden"
+        try:
+            infos = await asyncio.to_thread(
+                socket.getaddrinfo,
+                normalized,
+                port,
+                type=socket.SOCK_STREAM,
+            )
+        except OSError:
+            return False, "dns_resolution_failed"
+        addresses: set[ipaddress.IPv4Address | ipaddress.IPv6Address] = set()
+        for info in infos:
+            try:
+                addresses.add(ipaddress.ip_address(info[4][0]))
+            except (ValueError, IndexError):
+                continue
+        if not addresses:
+            return False, "dns_resolution_failed"
+    else:
+        addresses = {literal}
+    if any(not address.is_global for address in addresses):
+        return False, "non_public_destination"
+    return True, "ok"
+
+
+async def _safe_get_public_url(
+    client: httpx.AsyncClient,
+    url: str,
+    timeout: float = 15.0,
+    max_redirects: int = 5,
+) -> httpx.Response | None:
+    """GET a public URL while revalidating DNS and every redirect target."""
+    current = url
+    initial_scheme = urlsplit(url).scheme
+    for _ in range(max_redirects + 1):
+        allowed, reason = await _validate_public_url(current)
+        if not allowed:
+            _log(f"  blocked subscribe URL ({reason}): {_redact_url(current)}")
+            return None
+        try:
+            response = await client.get(
+                current, timeout=timeout, follow_redirects=False
+            )
+        except Exception as exc:  # noqa: BLE001
+            _log(f"  fetch subscribe content failed: {type(exc).__name__}")
+            return None
+        if response.status_code not in {301, 302, 303, 307, 308}:
+            return response
+        location = response.headers.get("location")
+        if not location:
+            return None
+        next_url = urljoin(current, location)
+        if initial_scheme == "https" and urlsplit(next_url).scheme != "https":
+            _log("  blocked subscribe redirect (TLS downgrade)")
+            return None
+        current = next_url
+    _log("  blocked subscribe URL (redirect limit exceeded)")
+    return None
+
+
+def _approved_panel_targets(cfg: dict) -> list[dict]:
+    """Return only targets explicitly listed under an enabled approval gate."""
+    panel_cfg = cfg.get("panel_register") or {}
+    if not isinstance(panel_cfg, dict) or panel_cfg.get("enabled") is not True:
+        return []
+    approved = panel_cfg.get("approved_targets") or []
+    targets: list[dict] = []
+    for item in approved:
+        if isinstance(item, str):
+            host, port = _split_host_port(item, 443)
+            target = {"host": host, "port": port, "source": "approved-config"}
+        elif isinstance(item, dict):
+            host_field = str(item.get("host") or "")
+            host, parsed_port = _split_host_port(host_field, 443)
+            port = item.get("port") or parsed_port
+            try:
+                port = int(port)
+            except (TypeError, ValueError):
+                continue
+            target = {"host": host, "port": port, "source": "approved-config"}
+        else:
+            continue
+        if target["host"]:
+            targets.append(target)
+    return _dedup_panels(targets)
 
 
 # ---------------------------------------------------------------------------
@@ -285,6 +427,10 @@ async def _register_and_grab_sub(
 
     # 1. Register
     reg_url = f"{base}{register_path}"
+    allowed, reason = await _validate_public_url(reg_url)
+    if not allowed:
+        _log(f"  blocked approved panel ({reason}): {_redact_url(reg_url)}")
+        return None
     try:
         r = await client.post(
             reg_url,
@@ -306,7 +452,7 @@ async def _register_and_grab_sub(
     if r.status_code >= 400:
         _log(
             f"  register blocked ({r.status_code}) on {host}:{port} — "
-            f"likely email-verify/invite — skip. body={_truncate(r.text)}"
+            "likely email-verify/invite — skip."
         )
         return None
 
@@ -324,7 +470,7 @@ async def _register_and_grab_sub(
     if not token:
         _log(
             f"  register OK but no token returned on {host}:{port} — "
-            f"likely needs email verify — skip. body={_truncate(r.text)}"
+            "likely needs email verify — skip."
         )
         return None
 
@@ -332,6 +478,10 @@ async def _register_and_grab_sub(
 
     # 2. Get subscribe URL
     sub_url = f"{base}{sub_path}"
+    allowed, reason = await _validate_public_url(sub_url)
+    if not allowed:
+        _log(f"  blocked panel API URL ({reason}): {_redact_url(sub_url)}")
+        return None
     try:
         sr = await client.get(
             sub_url,
@@ -363,11 +513,6 @@ async def _register_and_grab_sub(
     return subscribe_url
 
 
-def _truncate(s: str, n: int = 200) -> str:
-    s = (s or "").replace("\n", " ").strip()
-    return s[:n] + ("…" if len(s) > n else "")
-
-
 async def _fetch_subscribe_uris(
     client: httpx.AsyncClient, subscribe_url: str
 ) -> list[str]:
@@ -376,10 +521,8 @@ async def _fetch_subscribe_uris(
     Subscribe content is typically base64-encoded; if so we decode it first.
     Then regex-extract all protocol URIs. We also handle plain-text content.
     """
-    try:
-        r = await client.get(subscribe_url, timeout=15.0)
-    except Exception as e:  # noqa: BLE001
-        _log(f"  fetch subscribe content failed: {type(e).__name__}")
+    r = await _safe_get_public_url(client, subscribe_url, timeout=15.0)
+    if r is None:
         return []
     if r.status_code >= 400:
         _log(f"  subscribe content HTTP {r.status_code}")
@@ -435,21 +578,82 @@ def _dedup_panels(*hit_lists: list[dict]) -> list[dict]:
 
 
 def _append_uris(uris: list[str]) -> int:
-    """Append URIs to state/gray_nodes.jsonl (one URI per line). Dedup in-file."""
+    """Append quarantined JSON records, never implicitly publishable URI rows."""
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     existing: set[str] = set()
     if GRAY_NODES_FILE.exists():
         with GRAY_NODES_FILE.open("r", encoding="utf-8") as f:
             for line in f:
-                existing.add(line.strip())
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                    raw = rec.get("raw") or rec.get("uri")
+                    if isinstance(raw, str):
+                        existing.add(raw)
+                except Exception:
+                    existing.add(line)
     new = [u for u in uris if u and u not in existing]
     # Ensure the file always exists (touch) so downstream G3 resin publisher
     # has a stable path to read even when this run found nothing.
     GRAY_NODES_FILE.parent.mkdir(parents=True, exist_ok=True)
     with GRAY_NODES_FILE.open("a", encoding="utf-8") as f:
         for u in new:
-            f.write(u + "\n")
+            record = {
+                "raw": u,
+                "uri": u,
+                "tier": "gray",
+                "source_channel": "A4",
+                "enabled": False,
+                "watermark_suspect": True,
+                "review_status": "pending",
+                "ts": int(time.time()),
+            }
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
     return len(new)
+
+
+def _append_panel_leads(panels: list[dict]) -> int:
+    """Persist passive discovery results without turning them into targets."""
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    existing: set[tuple[str, int, str]] = set()
+    if PANEL_LEADS_FILE.exists():
+        for line in PANEL_LEADS_FILE.read_text(encoding="utf-8").splitlines():
+            try:
+                rec = json.loads(line)
+                existing.add(
+                    (str(rec.get("host")), int(rec.get("port")), str(rec.get("source")))
+                )
+            except Exception:
+                continue
+    written = 0
+    with PANEL_LEADS_FILE.open("a", encoding="utf-8") as handle:
+        for panel in panels:
+            key = (
+                str(panel.get("host") or ""),
+                int(panel.get("port") or 443),
+                str(panel.get("source") or "unknown"),
+            )
+            if not key[0] or key in existing:
+                continue
+            existing.add(key)
+            handle.write(
+                json.dumps(
+                    {
+                        "host": key[0],
+                        "port": key[1],
+                        "source": key[2],
+                        "panel_marker": _looks_like_panel(panel),
+                        "approved": False,
+                        "ts": int(time.time()),
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+            written += 1
+    return written
 
 
 def _update_last_run(summary: dict) -> None:
@@ -481,21 +685,22 @@ async def _run_async() -> dict:
         "fofa_hits": 0,
         "quake_hits": 0,
         "panels_found": 0,
+        "leads_written": 0,
+        "approved_targets": 0,
         "panels_registered": 0,
         "nodes_collected": 0,
         "skipped_no_key": [],
     }
 
-    verify = bool(cfg.get("verify_tls", False))
     timeout = cfg.get("request_timeout_seconds", 15.0)
     headers = {"User-Agent": "gray-aggregator/1.0"}
 
     async with httpx.AsyncClient(
-        verify=verify, timeout=timeout, headers=headers, follow_redirects=True
-    ) as client:
-        shodan_hits = await _shodan_search(client, cfg)
-        fofa_hits = await _fofa_search(client, cfg)
-        quake_hits = await _quake_search(client, cfg)
+        verify=True, timeout=timeout, headers=headers, follow_redirects=False
+    ) as intelligence_client:
+        shodan_hits = await _shodan_search(intelligence_client, cfg)
+        fofa_hits = await _fofa_search(intelligence_client, cfg)
+        quake_hits = await _quake_search(intelligence_client, cfg)
 
         summary["shodan_hits"] = len(shodan_hits)
         summary["fofa_hits"] = len(fofa_hits)
@@ -511,30 +716,45 @@ async def _run_async() -> dict:
         panels = _dedup_panels(shodan_hits, fofa_hits, quake_hits)
         summary["panels_found"] = len(panels)
         _log(f"Unique panel candidates: {len(panels)}.")
+        summary["leads_written"] = _append_panel_leads(panels)
 
+    approved_targets = _approved_panel_targets(cfg)
+    summary["approved_targets"] = len(approved_targets)
+    if not approved_targets:
+        _log("Registration gate closed; passive leads only.")
+    else:
         max_attempts = int(cfg.get("max_panel_attempts", 50))
         all_uris: list[str] = []
-        for p in panels[:max_attempts]:
-            host, port = p.get("host"), p.get("port")
-            if not host:
-                continue
-            _log(f"Trying panel {host}:{port} (src={p.get('source')})...")
-            sub_url = await _register_and_grab_sub(client, cfg, host, port)
-            if not sub_url:
-                continue
-            summary["panels_registered"] += 1
-            _log(f"  subscribe URL: {sub_url}")
-            uris = await _fetch_subscribe_uris(client, sub_url)
-            if uris:
-                _log(f"  harvested {len(uris)} URIs.")
-                all_uris.extend(uris)
-            else:
-                _log(f"  no URIs in subscribe content.")
+        panel_verify = bool((cfg.get("panel_register") or {}).get("verify_tls", True))
+        async with httpx.AsyncClient(
+            verify=panel_verify,
+            timeout=timeout,
+            headers=headers,
+            follow_redirects=False,
+        ) as panel_client:
+            for p in approved_targets[:max_attempts]:
+                host, port = p.get("host"), p.get("port")
+                if not host:
+                    continue
+                _log(f"Trying explicitly approved panel {host}:{port}...")
+                sub_url = await _register_and_grab_sub(
+                    panel_client, cfg, host, int(port)
+                )
+                if not sub_url:
+                    continue
+                summary["panels_registered"] += 1
+                _log(f"  subscribe URL: {_redact_url(sub_url)}")
+                uris = await _fetch_subscribe_uris(panel_client, sub_url)
+                if uris:
+                    _log(f"  harvested {len(uris)} quarantined URIs.")
+                    all_uris.extend(uris)
+                else:
+                    _log("  no URIs in subscribe content.")
 
         # Dedup + append to state file.
         added = _append_uris(all_uris)
         summary["nodes_collected"] = added
-        _log(f"Wrote {added} new URIs to {GRAY_NODES_FILE}.")
+        _log(f"Wrote {added} quarantined records to {GRAY_NODES_FILE}.")
 
     _update_last_run(summary)
     return summary

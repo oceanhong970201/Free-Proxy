@@ -28,8 +28,12 @@ quake_queries:
   - 'app:"Xboard"'
   - 'app:"sing-box"'
 
-# ---- Open-register panel harvest ----
+# ---- Approved-target registration review (off by default) ----
 panel_register:
+  enabled: false
+  # Registration is attempted only for entries explicitly added here.
+  approved_targets: []
+  verify_tls: true
   default_email: gray@protonmail.com
   default_password: ${PANEL_PASSWORD}
   # V2Board/Xboard register endpoint
@@ -40,14 +44,13 @@ panel_register:
 # ---- Rate limiting (per API) ----
 rate_limit_seconds: 1.0   # Shodan/FOFA/Quake: 1 req/s politeness
 request_timeout_seconds: 15.0
-# Many panels use self-signed certs — verify=False
-verify_tls: false
 # Max panels to attempt registration against per run (cap blast radius)
 max_panel_attempts: 50
 
 # ---- Public scanning (off by default, needs dedicated research VPS) ----
 scan:
   enabled: false
+  leads_only: true
   ports_tcp: [8388, 443, 8080, 2052, 2083, 2087, 2096, 8443, 7001]
   ports_udp: [443, 36712, 51820]
   rate: 10000

@@ -12,20 +12,19 @@ Two scrape modes (web_preview default, mtproto reserved):
   **mtproto** (off by default): telethon with api_id / api_hash / session_string.
   Reserved for future work; not implemented here.
 
-Honeytrap triage (7 points, see _gray_deep_research.md A5 §7):
+Honeytrap triage checklist (see _gray_deep_research.md A5 §7):
   1. watermark token  — per-user unique token / unique node password pattern
   2. provenance       — forward-graph diversity (single channel pushing one
                         host repeatedly == suspect)
   3. hosting domain   — URI host is panel domain vs subconverter / net-drive
-  4. TTL              — real leaks stop refreshing after rotation; honeypots
-                        never die (needs resample; flagged as TODO here)
-  5. client-coupling  — only works with airport's self-built client => watermarked
-  6. never third-party subconverter validation
-  7. urlclash-converter local preview (only flagged as recommendation, not run)
+  4. TTL and 5. client-coupling are explicitly marked unassessed because they
+     require cross-run/runtime evidence.
+  6. third-party conversion and 7. local preview are reported as not performed.
 
 Nodes are written to state/gray_nodes.jsonl as JSON lines:
   {raw, uri, channel, tier:"deep-gray", source_channel:"A5",
-   enabled:false, watermark_suspect:bool, triage_reasons:[...], ts}
+   enabled:false, watermark_suspect:true|null, triage_reasons:[...],
+   triage_unassessed:[...], ts}
 
 Run directly:  python src/aggregator/tg_recon.py
 CLI:           python src/aggregator/cli.py tg-recon
@@ -35,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import json
 import os
 import re
@@ -233,6 +233,16 @@ async def scrape_channel(
 
 
 def _uri_host(uri: str) -> str:
+    if uri.lower().startswith("vmess://"):
+        payload = uri.split("://", 1)[1]
+        try:
+            padded = payload + "=" * (-len(payload) % 4)
+            decoded = base64.urlsafe_b64decode(padded).decode("utf-8", errors="strict")
+            value = json.loads(decoded)
+            if isinstance(value, dict):
+                return str(value.get("add") or value.get("host") or "").lower()
+        except Exception:  # noqa: BLE001
+            return ""
     try:
         host = urlparse(uri).hostname or ""
     except Exception:  # noqa: BLE001
@@ -285,55 +295,48 @@ def _hosting_is_panel(uri: str) -> bool:
     return True
 
 
-def _client_coupling_suspect(uri: str) -> bool:
-    """Triage point 5 — client-coupling: only works with airport's self-built
-    client => watermarked. We can't truly test this without running the node,
-    so we flag vmess with non-standard path/aid patterns as a *maybe*.
-    """
-    s = uri.lower()
-    if s.startswith("vmess://"):
-        # vmess base64 JSON decoded would be needed for real check; flag the
-        # presence of aid/tls fields via heuristic on the raw uri only if long
-        return len(uri) > 120
-    return False
-
-
 def honeytrap_triage(
     uri: str,
     channel: str,
     history: list[dict],
     cfg: dict | None = None,
 ) -> dict:
-    """Run the 7-point honeytrap triage on a single URI.
+    """Return an evidence-only triage verdict for a single URI.
 
-    history = list of all harvested records (across channels) for provenance.
-
-    Returns {suspect: bool, reasons: [str]}.
-
-    Note: points 4 (TTL) and 6 (third-party subconverter validation) and 7
-    (urlclash-converter local preview) require either cross-run state or local
-    tooling we don't invoke here — recorded as recommendation reasons only.
+    Checks this run did not perform are reported as unassessed instead of being
+    mixed into positive evidence or described as completed checks.
     """
     cfg = cfg or {}
     reasons: list[str] = []
+    checks: dict[str, str] = {}
     host = _uri_host(uri)
 
     # 1. watermark token
     if _looks_like_watermark(uri):
         reasons.append("watermark_token: per-user/opaque token pattern in path/query")
+        checks["watermark_token"] = "suspect"
+    else:
+        checks["watermark_token"] = "no_heuristic_match"
 
     # 2. provenance forward-graph diversity — single channel pushing one host
     push_threshold = int(cfg.get("single_channel_push_threshold", 3))
+    same_host_records = [
+        r for r in history if host and _uri_host(r.get("uri", "")) == host
+    ]
     same_host_same_channel = sum(
-        1
-        for r in history
-        if r.get("channel") == channel and _uri_host(r.get("uri", "")) == host
+        1 for r in same_host_records if r.get("channel") == channel
     )
-    if same_host_same_channel >= push_threshold:
+    host_channels = {str(r.get("channel")) for r in same_host_records}
+    if host and same_host_same_channel >= push_threshold and len(host_channels) == 1:
         reasons.append(
             f"provenance: single channel '{channel}' pushed host '{host}' "
             f"{same_host_same_channel}x (>= {push_threshold})"
         )
+        checks["provenance"] = "suspect"
+    elif host:
+        checks["provenance"] = "no_heuristic_match"
+    else:
+        checks["provenance"] = "not_assessed_host_unavailable"
 
     # 3. hosting domain
     if not _hosting_is_panel(uri):
@@ -341,40 +344,36 @@ def honeytrap_triage(
             f"hosting: host '{host}' looks like subconverter/net-drive "
             "(not panel-owned)"
         )
+        checks["hosting"] = "suspect"
+    else:
+        checks["hosting"] = "no_heuristic_match"
 
-    # 4. TTL — real leaks stop after rotation; honeypots never die.
-    # We can't measure cross-run TTL in a single scrape pass; flag as a
-    # follow-up recommendation reason for the human triager.
-    reasons.append(
-        "ttl: needs cross-run resample to confirm rotation behavior "
-        "(honeypot never dies) — RECOMMENDED re-check in 24h"
-    )
-
-    # 5. client-coupling
-    if _client_coupling_suspect(uri):
-        reasons.append(
-            "client_coupling: vmess with long/non-standard payload "
-            "(may require self-built client => watermarked)"
-        )
-
-    # 6. never validate via third-party subconverter
-    reasons.append(
-        "no_thirdparty_subconverter: do NOT validate via public subconverter "
-        "backends (would leak the node); use local urlclash-converter"
-    )
-
-    # 7. urlclash-converter local preview (recommendation, not executed)
-    reasons.append(
-        "urlclash-converter: preview node parameters locally with "
-        "urlclash-converter (browser-only, no network) before enabling"
-    )
-
-    suspect = any(
-        r.split(":", 1)[0]
-        in {"watermark_token", "provenance", "hosting", "client_coupling"}
-        for r in reasons
-    )
-    return {"suspect": suspect, "reasons": reasons}
+    # TTL needs observations from multiple runs; client coupling needs an
+    # actual compatibility test. URI length is not evidence for either.
+    checks["ttl"] = "not_assessed_cross_run_history_required"
+    checks["client_coupling"] = "not_assessed_runtime_test_required"
+    checks["third_party_conversion"] = "not_performed"
+    checks["local_preview"] = "not_performed"
+    unassessed = [
+        "ttl",
+        "client_coupling",
+        "third_party_conversion",
+        "local_preview",
+    ]
+    suspect = bool(reasons)
+    return {
+        "suspect": suspect,
+        "verdict": "suspect" if suspect else "inconclusive",
+        "reasons": reasons,
+        "checks": checks,
+        "unassessed_checks": unassessed,
+        "recommendations": [
+            "resample after the configured TTL interval",
+            "review parameters locally without a third-party converter",
+            "perform client-coupling checks before approval",
+        ],
+        "complete": False,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -433,8 +432,14 @@ def _append_gray_nodes(records: list[dict]) -> int:
                 "tier": "deep-gray",
                 "source_channel": "A5",
                 "enabled": False,
-                "watermark_suspect": bool(triage.get("suspect")),
+                # A lack of heuristic evidence is not a clean bill of health:
+                # incomplete triage remains null/fail-closed until review.
+                "watermark_suspect": True if triage.get("suspect") else None,
+                "review_status": "pending",
+                "triage_verdict": triage.get("verdict", "inconclusive"),
                 "triage_reasons": triage.get("reasons", []),
+                "triage_checks": triage.get("checks", {}),
+                "triage_unassessed": triage.get("unassessed_checks", []),
                 "provenance": {
                     "channel": rec.get("channel"),
                     "msg_id": rec.get("msg_id"),
@@ -470,6 +475,7 @@ async def _run_async() -> dict:
         "uris_harvested": 0,
         "nodes_written": 0,
         "watermark_suspect_count": 0,
+        "triage_inconclusive_count": 0,
         "channels_skipped": 0,
     }
 
@@ -526,6 +532,8 @@ async def _run_async() -> dict:
         rec["triage"] = t
         if t["suspect"]:
             summary["watermark_suspect_count"] += 1
+        else:
+            summary["triage_inconclusive_count"] += 1
         triaged.append(rec)
 
     written = _append_gray_nodes(triaged)

@@ -1,44 +1,34 @@
-"""Two-layer dedup (Stage 4).
-
-Level 1 (sources layer): canonical URL — github.com/.../raw ↔ raw.githubusercontent.com
-Level 2 (node layer):    (host:port:proto:cred:sni) + content_hash
-                         content_hash = sha256(sorted normalized node set)
-
-Dead sources (404/410) are tombstoned — record kept, not deleted.
-"""
+"""Source and proxy-node deduplication helpers."""
 
 from __future__ import annotations
 
 import hashlib
 import json
 import re
-from urllib.parse import urlparse
 
 from .models import ProxyNode
 
-# canonical URL: map github.com/<u>/<r>/raw/<branch>/<path> -> raw.githubusercontent.com/<u>/<r>/<branch>/<path>
+
 _GITHUB_COM_RE = re.compile(
     r"^https?://github\.com/([^/]+)/([^/]+)/raw/(.+)$", re.IGNORECASE
 )
 
 
 def canonical_url(url: str) -> str:
-    """Level 1 canonicalization. Normalizes github raw URLs to raw.githubusercontent.com."""
+    """Normalize equivalent GitHub raw-content URLs."""
     if not url:
         return ""
-    u = url.strip()
-    m = _GITHUB_COM_RE.match(u)
-    if m:
-        user, repo, rest = m.group(1), m.group(2), m.group(3)
+    stripped = url.strip()
+    match = _GITHUB_COM_RE.match(stripped)
+    if match:
+        user, repo, rest = match.groups()
         return f"https://raw.githubusercontent.com/{user}/{repo}/{rest}"
-    return u.rstrip("/").lower()
+    return stripped.rstrip("/").lower()
 
 
-def normalize_node(n: ProxyNode) -> str:
-    """Stable serialization of a node for content_hashing (field-sorted, Nones dropped)."""
-    d = n.model_dump(exclude_none=True)
-    # drop runtime / provenance fields so hash is content-only
-    for k in (
+def normalize_node(node: ProxyNode) -> str:
+    """Stable serialization of connection semantics for content hashing."""
+    excluded = {
         "raw",
         "alive",
         "latency_ms",
@@ -46,44 +36,56 @@ def normalize_node(n: ProxyNode) -> str:
         "content_hash",
         "name",
         "download_speed",
-    ):
-        d.pop(k, None)
-    # sort keys + items for determinism
-    return json.dumps(d, sort_keys=True, ensure_ascii=False)
+    }
+    values = node.model_dump(exclude=excluded, exclude_none=False)
+    values["proto"] = (node.proto or "").lower()
+    values["host"] = (node.host or "").lower()
+    for key in ("sni", "net", "security"):
+        value = values.get(key)
+        if isinstance(value, str):
+            values[key] = value.lower()
+    return json.dumps(values, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
 def content_hash(nodes: list[ProxyNode]) -> str:
-    """Level 2: sha256 of the sorted normalized node set — catches mirror subs with identical content."""
-    blobs = sorted(normalize_node(n) for n in nodes)
-    payload = "\n".join(blobs).encode("utf-8")
+    """Hash the normalized node set, independent of input order/duplicates."""
+    payload = "\n".join(sorted({normalize_node(node) for node in nodes})).encode(
+        "utf-8"
+    )
     return hashlib.sha256(payload).hexdigest()
 
 
-def node_dedup_key(n: ProxyNode) -> str:
-    """Per-node dedup key (contract)."""
-    return n.dedup_key()
+def node_dedup_key(node: ProxyNode) -> str:
+    return node.dedup_key()
 
 
 def dedupe_nodes(nodes: list[ProxyNode]) -> tuple[list[ProxyNode], list[ProxyNode]]:
-    """Return (unique_nodes, dropped_duplicates). Dedup by dedup_key + raw URI."""
+    """Return unique nodes and duplicates.
+
+    A semantic match is always a duplicate. The raw-URI guard is exact and
+    case-sensitive because credentials, paths and fragments can be
+    case-sensitive. Empty raw values do not collide with one another.
+    """
     seen_keys: set[str] = set()
     seen_raw: set[str] = set()
     unique: list[ProxyNode] = []
     dropped: list[ProxyNode] = []
-    for n in nodes:
-        k = node_dedup_key(n)
-        r = n.raw.strip().lower()
-        if k in seen_keys or r in seen_raw:
-            dropped.append(n)
+    for node in nodes:
+        key = node_dedup_key(node)
+        raw = node.raw.strip()
+        raw_seen = bool(raw) and raw in seen_raw
+        if key in seen_keys or raw_seen:
+            dropped.append(node)
             continue
-        seen_keys.add(k)
-        seen_raw.add(r)
-        unique.append(n)
+        seen_keys.add(key)
+        if raw:
+            seen_raw.add(raw)
+        unique.append(node)
     return unique, dropped
 
 
-def tombstone_source(src: dict, reason: str = "dead") -> dict:
-    """Mark a source tombstoned — record kept for Wayback revival."""
-    src["status"] = f"tombstoned:{reason}"
-    src["enabled"] = False
-    return src
+def tombstone_source(source: dict, reason: str = "dead") -> dict:
+    """Retain a dead source record while disabling future fetches."""
+    source["status"] = f"tombstoned:{reason}"
+    source["enabled"] = False
+    return source

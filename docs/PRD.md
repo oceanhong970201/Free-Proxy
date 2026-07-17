@@ -4,6 +4,8 @@
 > 性質：操作手冊，非概念文檔。每階段含任務、驗收、檔案路徑、指令。
 > 執行者：AI agent（Claude Code + skills/hooks/subagents/MCP）+ 人類審核。
 > 語言：繁體中文。所有路徑以 Windows `C:\Users\win10\Documents\Free-Proxy` 為根（記號 `$ROOT`）。
+>
+> **維護註記（2026-07-16）**：本檔保留早期需求與目標態，不能用來判定目前部署狀態。現行 fail-closed 行為、Worker snapshot 合約、D1 migration 順序與操作命令，以 [`STATUS.md`](STATUS.md) 與 [`../infra/DEPLOY.md`](../infra/DEPLOY.md) 為準。
 
 ---
 
@@ -164,7 +166,7 @@ go install github.com/faceair/clash-speedtest@latest
 2. 啟動驗證：`curl http://localhost:25500/version`。
 3. 撰 `src/worker/sub-aggregator.ts`（CF Worker）：
    - `GET /sub` → 從 D1 `nodes` 撈 `alive=1` ORDER BY `latency_ms`，base64 後回傳。
-   - `GET /admin/import`（POST, `X-Admin-Token` header）→ 接收 base64 節點清單，upsert D1。
+   - `POST /admin/import`（`X-Admin-Token` header）→ 接收 version 1 JSON snapshot；在同一 D1 batch 完成 upsert、舊 snapshot 停用與 `import_state` 更新，再驗證 counts。
    - KV 快取 `/sub` 60s。
 4. `src/worker/wrangler.toml`：D1 binding `DB`、KV binding `CACHE`、cron `0 */2 * * *`。
 5. 部署：`npx wrangler deploy`（需 CF token）。
@@ -172,7 +174,7 @@ go install github.com/faceair/clash-speedtest@latest
 ### 2.2 驗收
 - [ ] subconverter Docker 跑著，`/sub?target=clash&url=<base64>` 回傳 clash YAML。
 - [ ] Worker 部署後 `https://<worker>.dev/sub` 回傳 base64 節點清單。
-- [ ] `/admin/import` 用錯 token 回 401，正確 token upsert 成功。
+- [ ] `/admin/import` 用錯 token 回 401；正確 token 回 `ok:true`、`complete:true`、相同 `snapshot_id`，且 `imported == expected == expected_count`。
 - [ ] KV 快取生效（連打 `/sub` 第二次 D1 query 數不增）。
 
 ### 2.3 注意

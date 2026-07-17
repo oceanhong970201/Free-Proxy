@@ -18,7 +18,7 @@ import re
 import shutil
 import subprocess
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -71,6 +71,7 @@ def _load_scan_config() -> dict:
     """
     cfg = {
         "enabled": False,
+        "leads_only": True,
         "ports_tcp": DEFAULT_PORTS_TCP,
         "ports_udp": [443, 36712, 51820],
         "rate": DEFAULT_RATE,
@@ -92,6 +93,14 @@ def _load_scan_config() -> dict:
     kv = re.search(r"(?m)^\s*enabled:\s*(\w+)", body)
     if kv:
         cfg["enabled"] = kv.group(1).strip().lower() in ("true", "1", "yes", "on")
+    leads_only = re.search(r"(?m)^\s*leads_only:\s*(\w+)", body)
+    if leads_only:
+        cfg["leads_only"] = leads_only.group(1).strip().lower() in (
+            "true",
+            "1",
+            "yes",
+            "on",
+        )
     rate = re.search(r"(?m)^\s*rate:\s*(\d+)", body)
     if rate:
         cfg["rate"] = int(rate.group(1))
@@ -145,6 +154,8 @@ def run_masscan(targets: list[str], ports: list[int], rate: int) -> list[OpenPor
     tmp = ROOT / "state" / "_scan_targets.tmp"
     tmp.parent.mkdir(parents=True, exist_ok=True)
     tmp.write_text("\n".join(targets) + "\n", encoding="utf-8")
+    # A failed/aborted scan must never be mistaken for a fresh result.
+    GNMAP_OUT.unlink(missing_ok=True)
 
     port_arg = ",".join(str(p) for p in ports)
     cmd = [
@@ -167,15 +178,9 @@ def run_masscan(targets: list[str], ports: list[int], rate: int) -> list[OpenPor
     except Exception as e:  # noqa: BLE001
         logger.warning("masscan 執行失敗: %s", e)
         return []
-    if proc.returncode not in (0,):
-        # masscan 對部分 open 回非零, gnmap 仍可能有值; 但常見為權限不足
+    if proc.returncode != 0:
         logger.warning("masscan exit=%d (可能需 root/cap_net_raw)", proc.returncode)
-        if (
-            "permission" in (proc.stderr or "").lower()
-            or "root" in (proc.stderr or "").lower()
-        ):
-            logger.warning("masscan 需 root 或 setcap cap_net_raw, 放棄")
-            return []
+        return []
     return _parse_gnmap(GNMAP_OUT)
 
 
@@ -229,11 +234,17 @@ def run_nmap(open_ports: list[OpenPort]) -> list[ServiceInfo]:
     if not open_ports:
         return []
     hosts = sorted({p.host for p in open_ports})
+    approved_ports = sorted({p.port for p in open_ports if 1 <= p.port <= 65535})
+    if not approved_ports:
+        return []
+    NMAP_OUT.unlink(missing_ok=True)
     cmd = [
         "nmap",
         "-sS",
         "-sV",
         "-Pn",
+        "-p",
+        ",".join(str(port) for port in approved_ports),
         "--script",
         "banner,ssl-cert,http-enum,fingerprint-strings",
         "-oX",
@@ -241,14 +252,22 @@ def run_nmap(open_ports: list[OpenPort]) -> list[ServiceInfo]:
     ] + hosts
     logger.info("nmap: %d hosts", len(hosts))
     try:
-        subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
     except subprocess.TimeoutExpired:
         logger.warning("nmap 超時, 放棄指紋階段")
         return []
     except Exception as e:  # noqa: BLE001
         logger.warning("nmap 執行失敗: %s", e)
         return []
-    return _parse_nmap_xml(NMAP_OUT)
+    if proc.returncode != 0:
+        logger.warning("nmap exit=%d; ignoring output", proc.returncode)
+        return []
+    approved = {(p.host, p.port) for p in open_ports}
+    return [
+        service
+        for service in _parse_nmap_xml(NMAP_OUT)
+        if (service.host, service.port) in approved
+    ]
 
 
 def _parse_nmap_xml(path: Path) -> list[ServiceInfo]:
@@ -273,6 +292,8 @@ def _parse_nmap_xml(path: Path) -> list[ServiceInfo]:
         ):
             port = int(port_m.group(1))
             pbody = port_m.group(2)
+            if not re.search(r'<state\s+[^>]*state="open"', pbody):
+                continue
             svc_m = re.search(
                 r'<service\s+name="([^"]*)"(?:[^>]*product="([^"]*)")?', pbody
             )
@@ -340,7 +361,6 @@ def _load_existing_vmess_uuids() -> list[str]:
     uuids: list[str] = []
     if not GRAY_NODES.exists():
         return uuids
-    uuid_re = re.compile(r'"uuid":"([^"]+)"')
     for line in GRAY_NODES.read_text(encoding="utf-8", errors="replace").splitlines():
         line = line.strip()
         if not line or not line.startswith("vmess://"):
@@ -398,6 +418,7 @@ def _build_vmess_uri(host: str, port: int, uuid: str, path: str) -> str:
 def _reconstruct_nodes(
     services: list[ServiceInfo],
     open_ports: list[OpenPort],
+    allow_credential_guesses: bool = False,
 ) -> tuple[list[str], list[dict]]:
     """對配置不當服務用常見默認值重建 URI.
 
@@ -415,7 +436,11 @@ def _reconstruct_nodes(
         svc_map[(s.host, s.port)] = s
 
     seen: set[tuple[str, int, str]] = set()
-    vmess_uuid_candidates = _load_existing_vmess_uuids() or [VMESS_DEFAULT_UUID]
+    vmess_uuid_candidates = (
+        (_load_existing_vmess_uuids() or [VMESS_DEFAULT_UUID])
+        if allow_credential_guesses
+        else []
+    )
 
     for op in open_ports:
         svc = svc_map.get((op.host, op.port))
@@ -431,6 +456,13 @@ def _reconstruct_nodes(
             "recovered": False,
             "ts": ts,
         }
+
+        # The production default is leads-only. Protocol fingerprints are
+        # useful evidence, but synthesizing credentials produces unverified
+        # node records and must require an explicit configuration opt-in.
+        if not allow_credential_guesses:
+            leads.append(lead)
+            continue
 
         # 只對無 auth / 預設憑證特徵的服務嘗試重建
         # 判定為「配置不當」: 靜默 ss (8388 open 無 banner) 或
@@ -499,6 +531,53 @@ def _append_lines(path: Path, lines: list[str]) -> None:
             f.write(ln.rstrip("\n") + "\n")
 
 
+def _append_recovered_nodes(uris: list[str]) -> int:
+    """Append explicitly enabled recovery output as quarantined JSON records."""
+    if not uris:
+        return 0
+    GRAY_NODES.parent.mkdir(parents=True, exist_ok=True)
+    existing: set[str] = set()
+    if GRAY_NODES.exists():
+        for line in GRAY_NODES.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+                uri = record.get("raw") or record.get("uri")
+            except Exception:  # noqa: BLE001
+                uri = line
+            if isinstance(uri, str):
+                existing.add(uri)
+
+    ts = int(time.time())
+    written = 0
+    with GRAY_NODES.open("a", encoding="utf-8") as handle:
+        for uri in uris:
+            if not uri or uri in existing:
+                continue
+            existing.add(uri)
+            handle.write(
+                json.dumps(
+                    {
+                        "raw": uri,
+                        "uri": uri,
+                        "tier": "gray",
+                        "source_channel": "scanner",
+                        "enabled": False,
+                        "watermark_suspect": True,
+                        "review_status": "pending",
+                        "credential_guess": True,
+                        "ts": ts,
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+            written += 1
+    return written
+
+
 def _write_summary(summary: dict) -> None:
     last_run = ROOT / "state" / "last-run.json"
     try:
@@ -563,8 +642,11 @@ def run(
             "reason": "no_targets",
         }
 
-    use_ports = ports or cfg["ports_tcp"]
+    use_ports = sorted(
+        {port for port in (ports or cfg["ports_tcp"]) if 1 <= int(port) <= 65535}
+    )
     use_rate = rate or cfg["rate"]
+    leads_only = bool(cfg.get("leads_only", True))
 
     logger.info(
         "掃描目標: %d 個 CIDR/IP, ports=%s, rate=%d", len(targets), use_ports, use_rate
@@ -576,18 +658,23 @@ def run(
     services = run_nmap(open_ports)
     logger.info("nmap 識別 %d 個服務條目", len(services))
 
-    recovered_uris, leads = _reconstruct_nodes(services, open_ports)
+    recovered_uris, leads = _reconstruct_nodes(
+        services,
+        open_ports,
+        allow_credential_guesses=not leads_only,
+    )
 
     # 輸出
-    _append_lines(GRAY_NODES, recovered_uris)
-    _append_lines(LEADS_FILE, [json.dumps(l, ensure_ascii=False) for l in leads])
+    recovered_written = _append_recovered_nodes(recovered_uris)
+    _append_lines(LEADS_FILE, [json.dumps(lead, ensure_ascii=False) for lead in leads])
 
     summary = {
         "scanned_ips": len(targets),
         "open_ports": len(open_ports),
         "services_identified": len(services),
-        "nodes_recovered": len(recovered_uris),
+        "nodes_recovered": recovered_written,
         "leads": len(leads),
+        "leads_only": leads_only,
         "ts": int(time.time()),
     }
     _write_summary(summary)

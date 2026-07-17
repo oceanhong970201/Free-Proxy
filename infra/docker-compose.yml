@@ -1,6 +1,6 @@
 services:
   subconverter:
-    image: tindy2013/subconverter:latest
+    image: tindy2013/subconverter:0.9.0@sha256:41899af10188ce83f6359eacc3d12f33c74b423c35b37bcd09b686575e9e10ad
     ports:
-      - "25500:25500"
-    restart: always
+      - "127.0.0.1:25500:25500"
+    restart: unless-stopped

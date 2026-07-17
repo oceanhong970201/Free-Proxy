@@ -1,9 +1,10 @@
-"""typer + rich CLI (Stage 1).
+"""Typer + Rich CLI for the Free-Proxy aggregation pipeline.
 
   fetch  — sources.json -> state/staging.jsonl
   parse  — staging.jsonl -> dedup -> SQLite nodes table
-  verify — clash-speedtest stub -> backfill state/live.jsonl
-  emit   — live.jsonl -> output/{clash.yaml,singbox.json,v2ray-base64.txt}
+  verify — clash-speedtest -> backfill state/live.jsonl
+  emit   — live.jsonl -> subscriptions + sanitized output/pipeline-status.json
+  dashboard — loopback operations UI + isolated node IP checks
   all    — fetch -> parse -> verify -> emit (CI entrypoint)
 
 Updates state/last-run.json {stage, ts, counts} after each run.
@@ -11,13 +12,18 @@ Updates state/last-run.json {stage, ts, counts} after each run.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import shutil
 import sqlite3
 import subprocess
 import sys
 import time
+import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from urllib.parse import urlparse
 
 # Bootstrap: allow bare `python src/aggregator/cli.py <cmd>` as the contract specifies,
 # not just `python -m aggregator.cli`. Insert src/ on path before relative imports.
@@ -50,8 +56,12 @@ STAGING = STATE / "staging.jsonl"
 LIVE = STATE / "live.jsonl"
 LAST_RUN = STATE / "last-run.json"
 
-app = typer.Typer(help="Free-Proxy aggregator CLI (Stage 1).")
+app = typer.Typer(help="Free-Proxy aggregator CLI.")
 console = Console()
+
+VERIFY_PROGRESS_SCHEMA_VERSION = 4
+TIER1_BATCH_SIZE = 50
+TIER2_BATCH_SIZE = 30
 
 
 def _now() -> int:
@@ -72,18 +82,76 @@ def _write_last_run(stage: int, counts: dict, extra: dict | None = None) -> None
     )
 
 
+def _load_completed_verify_summary() -> tuple[dict | None, str | None]:
+    """Load only the immediately preceding successful verification metadata."""
+
+    try:
+        document = json.loads(LAST_RUN.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None, "no valid preceding verify status"
+    if not isinstance(document, dict) or document.get("last_stage_cmd") != "verify":
+        return None, "emit must immediately follow a successful verify run"
+    counts = document.get("counts")
+    if not isinstance(counts, dict) or set(counts) != {"verify"}:
+        return None, "preceding verify status has an invalid shape"
+    summary = counts.get("verify")
+    if (
+        not isinstance(summary, dict)
+        or summary.get("success") is not True
+        or summary.get("completed") is not True
+    ):
+        return None, "preceding verify run was not completed successfully"
+    return summary, None
+
+
 def _init_db() -> sqlite3.Connection:
     DB.parent.mkdir(parents=True, exist_ok=True)
     schema = (ROOT / "infra" / "d1" / "schema.sql").read_text(encoding="utf-8")
     conn = sqlite3.connect(str(DB))
-    conn.executescript(schema)
-    # Migration: add download_speed column to pre-existing nodes.db.
-    # schema.sql already declares it for fresh DBs, but existing DBs created
-    # before this change need the column added explicitly. Idempotent.
     try:
-        conn.execute("ALTER TABLE nodes ADD COLUMN download_speed REAL")
-    except sqlite3.OperationalError:
-        pass  # column already exists
+        # Keep existing local databases compatible with the full ProxyNode model.
+        # node_json is authoritative; scalar columns remain queryable and mirror D1.
+        migrations = {
+            "download_speed": "REAL",
+            "alter_id": "INTEGER",
+            "transport_mode": "TEXT",
+            "method": "TEXT",
+            "security": "TEXT",
+            "tls": "INTEGER",
+            "path": "TEXT",
+            "host_header": "TEXT",
+            "flow": "TEXT",
+            "packet_encoding": "TEXT",
+            "fp": "TEXT",
+            "alpn": "TEXT",
+            "pbk": "TEXT",
+            "sid": "TEXT",
+            "spider_x": "TEXT",
+            "utls": "INTEGER",
+            "skip_cert_verify": "INTEGER",
+            "protocol": "TEXT",
+            "protocol_param": "TEXT",
+            "obfs": "TEXT",
+            "obfs_param": "TEXT",
+            "congestion_control": "TEXT",
+            "udp_relay_mode": "TEXT",
+            "node_json": "TEXT",
+            "snapshot_id": "TEXT",
+        }
+        table_exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='nodes'"
+        ).fetchone()
+        if table_exists:
+            existing = {row[1] for row in conn.execute("PRAGMA table_info(nodes)")}
+            for column, kind in migrations.items():
+                if column not in existing:
+                    conn.execute(f"ALTER TABLE nodes ADD COLUMN {column} {kind}")
+            conn.commit()
+        conn.executescript(schema)
+        conn.commit()
+    except BaseException:
+        conn.close()
+        raise
     return conn
 
 
@@ -96,102 +164,301 @@ def _fetch_logic() -> dict:
 
 def _parse_logic() -> dict:
     if not STAGING.exists():
-        console.print("[yellow]no staging.jsonl — skipping parse")
-        summary = {"raw_nodes": 0, "unique": 0, "duplicates": 0}
+        console.print("[red]no staging.jsonl — parse aborted")
+        summary = {
+            "raw_nodes": 0,
+            "unique": 0,
+            "duplicates": 0,
+            "success": False,
+            "error": "no staging.jsonl",
+        }
         _write_last_run(1, {"parse": summary}, extra={"last_stage_cmd": "parse"})
         return summary
 
-    sources_by_id = {s["id"]: s for s in _read_sources()}
+    sources = _read_sources()
+    staging_lines = [
+        line.strip()
+        for line in STAGING.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    fixture_mode = False
+    if os.environ.get("ALLOW_FIXTURE_FALLBACK") == "1" and len(staging_lines) == 1:
+        try:
+            fixture_record = json.loads(staging_lines[0])
+            fixture_mode = (
+                isinstance(fixture_record, dict)
+                and fixture_record.get("source_id") == "fixture-sample"
+                and isinstance(fixture_record.get("raw"), str)
+                and bool(fixture_record["raw"].strip())
+            )
+        except (TypeError, ValueError, json.JSONDecodeError):
+            fixture_mode = False
+
+    snapshot_sources = sources
+    if fixture_mode:
+        snapshot_sources = [
+            {
+                "id": "fixture-sample",
+                "url": "local://tests/fixtures/sample-sub.txt",
+                "format": "raw",
+                "enabled": True,
+                "tier": 99,
+                "status": "fixture",
+            }
+        ]
+    sources_by_id = {
+        s["id"]: s
+        for s in snapshot_sources
+        if isinstance(s, dict) and isinstance(s.get("id"), str) and s["id"]
+    }
+    enabled_ids = {
+        sid for sid, source in sources_by_id.items() if source.get("enabled")
+    }
     raw_nodes: list[ProxyNode] = []
     src_counts: dict[str, int] = {}
+    staged_sources: set[str] = set()
+    invalid_records = 0
+    rejected_sources: set[str] = set()
+    duplicate_sources: set[str] = set()
 
-    for line in STAGING.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
-            continue
+    for line_number, line in enumerate(staging_lines, 1):
         try:
             rec = json.loads(line)
-        except Exception:
+        except (TypeError, ValueError, json.JSONDecodeError):
+            invalid_records += 1
             continue
-        sid = rec.get("source_id", "unknown")
-        src_fmt = (
-            sources_by_id.get(sid, {}).get("format")
-            if sid in sources_by_id
-            else "v2ray"
-        )
-        text = rec.get("raw") or ""
-        nodes = parser.parse_raw(src_fmt, text)
+        if not isinstance(rec, dict):
+            invalid_records += 1
+            continue
+        sid = rec.get("source_id")
+        text = rec.get("raw")
+        if (
+            not isinstance(sid, str)
+            or not sid
+            or not isinstance(text, str)
+            or not text.strip()
+        ):
+            invalid_records += 1
+            continue
+        if sid not in enabled_ids:
+            rejected_sources.add(sid)
+            continue
+        if sid in staged_sources:
+            duplicate_sources.add(sid)
+            continue
+        staged_sources.add(sid)
+        src_fmt = sources_by_id[sid].get("format")
+        if not isinstance(src_fmt, str) or not src_fmt:
+            invalid_records += 1
+            continue
+        try:
+            nodes = parser.parse_raw(src_fmt, text)
+        except (TypeError, ValueError):
+            invalid_records += 1
+            continue
         for n in nodes:
             n.source = sid
         raw_nodes.extend(nodes)
-        src_counts[sid] = len(nodes)
+        src_counts[sid] = src_counts.get(sid, 0) + len(nodes)
+
+    missing_sources = sorted(enabled_ids - staged_sources)
+    empty_sources = sorted(sid for sid in enabled_ids if src_counts.get(sid, 0) == 0)
+    if (
+        invalid_records
+        or missing_sources
+        or empty_sources
+        or rejected_sources
+        or duplicate_sources
+    ):
+        summary = {
+            "raw_nodes": len(raw_nodes),
+            "unique": 0,
+            "duplicates": 0,
+            "by_source": src_counts,
+            "success": False,
+            "invalid_records": invalid_records,
+            "missing_sources": missing_sources,
+            "empty_sources": empty_sources,
+            "rejected_sources": sorted(rejected_sources),
+            "duplicate_sources": sorted(duplicate_sources),
+            "error": "staging snapshot failed validation; prior DB/live snapshot retained",
+        }
+        _write_last_run(1, {"parse": summary}, extra={"last_stage_cmd": "parse"})
+        return summary
 
     unique, dropped = dedupe.dedupe_nodes(raw_nodes)
     chash = dedupe.content_hash(unique)
-
-    conn = _init_db()
-    # Reset the nodes table to the current snapshot. Without this, rows from
-    # dropped sources (barryfar/nomorewalls) and stale vpnsuper URIs (name
-    # changes between runs create new PKs, so INSERT OR REPLACE never evicts
-    # the old ones) accumulate indefinitely and pollute verify's node load +
-    # the emitted live.jsonl. sources table is preserved (upserted below).
-    conn.execute("DELETE FROM nodes")
-    now = _now()
-    for s in _read_sources():
-        conn.execute(
-            """INSERT INTO sources(id,url,format,enabled,tier,last_fetch,last_count,status)
-               VALUES(?,?,?,?,?,?,?,?)
-               ON CONFLICT(id) DO UPDATE SET
-                 url=excluded.url, format=excluded.format, enabled=excluded.enabled,
-                 tier=excluded.tier, last_fetch=excluded.last_fetch,
-                 last_count=excluded.last_count, status=excluded.status""",
-            (
-                s["id"],
-                s["url"],
-                s["format"],
-                1 if s.get("enabled") else 0,
-                s.get("tier", 3),
-                s.get("last_fetch"),
-                src_counts.get(s["id"], 0),
-                s.get("status", "unknown"),
-            ),
-        )
-    for n in unique:
-        try:
-            conn.execute(
-                """INSERT INTO nodes(uri,proto,host,port,uuid,password,sni,net,country,latency_ms,alive,source,first_seen,last_checked,content_hash)
-                   VALUES(?,?,?,?,?,?,?,?,NULL,NULL,NULL,?,?,?,?)
-                   ON CONFLICT(uri) DO UPDATE SET
-                     proto=excluded.proto, host=excluded.host, port=excluded.port,
-                     uuid=excluded.uuid, password=excluded.password, sni=excluded.sni,
-                     net=excluded.net, source=excluded.source,
-                     last_checked=excluded.last_checked, content_hash=excluded.content_hash""",
-                (
-                    n.raw,
-                    n.proto,
-                    n.host,
-                    n.port,
-                    n.uuid,
-                    n.password,
-                    n.sni,
-                    n.net,
-                    n.source,
-                    now,
-                    now,
-                    chash,
-                ),
-            )
-        except sqlite3.IntegrityError:
-            pass
-    conn.commit()
-    conn.close()
+    if not unique:
+        summary = {
+            "raw_nodes": len(raw_nodes),
+            "unique": 0,
+            "duplicates": len(dropped),
+            "by_source": src_counts,
+            "success": False,
+            "error": "parser produced no nodes; prior DB/live snapshot retained",
+        }
+        _write_last_run(1, {"parse": summary}, extra={"last_stage_cmd": "parse"})
+        return summary
 
     LIVE.parent.mkdir(parents=True, exist_ok=True)
-    with LIVE.open("w", encoding="utf-8") as f:
+    live_tmp = LIVE.with_suffix(".jsonl.tmp")
+    with live_tmp.open("w", encoding="utf-8", newline="\n") as f:
         for n in unique:
-            d = n.model_dump()
-            d.setdefault("alive", None)
-            f.write(json.dumps(d, ensure_ascii=False) + "\n")
+            n.alive = None
+            n.latency_ms = None
+            n.download_speed = None
+            f.write(json.dumps(n.model_dump(mode="json"), ensure_ascii=False) + "\n")
+
+    conn = _init_db()
+    now = _now()
+    sources_path = fetcher.SOURCES_FILE
+    live_original = LIVE.read_bytes() if LIVE.exists() else None
+    sources_original = sources_path.read_bytes() if sources_path.exists() else None
+    live_attempted = False
+    sources_attempted = False
+
+    def restore_file(path: Path, previous: bytes | None) -> None:
+        current = path.read_bytes() if path.exists() else None
+        if current == previous:
+            return
+        if previous is None:
+            path.unlink(missing_ok=True)
+            return
+        restore = path.with_suffix(path.suffix + ".restore")
+        restore.write_bytes(previous)
+        restore.replace(path)
+
+    try:
+        previous_first_seen = dict(
+            conn.execute(
+                "SELECT uri, first_seen FROM nodes WHERE first_seen IS NOT NULL"
+            )
+        )
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("DELETE FROM nodes")
+        for s in snapshot_sources:
+            s["last_count"] = src_counts.get(s["id"], 0)
+            conn.execute(
+                """INSERT INTO sources(id,url,format,enabled,tier,last_fetch,last_count,status)
+                   VALUES(?,?,?,?,?,?,?,?)
+                   ON CONFLICT(id) DO UPDATE SET
+                     url=excluded.url, format=excluded.format, enabled=excluded.enabled,
+                     tier=excluded.tier, last_fetch=excluded.last_fetch,
+                     last_count=excluded.last_count, status=excluded.status""",
+                (
+                    s["id"],
+                    s["url"],
+                    s["format"],
+                    1 if s.get("enabled") else 0,
+                    s.get("tier", 3),
+                    s.get("last_fetch"),
+                    s["last_count"],
+                    s.get("status", "unknown"),
+                ),
+            )
+        for n in unique:
+            node_hash = hashlib.sha256(
+                dedupe.normalize_node(n).encode("utf-8")
+            ).hexdigest()
+            scalar_alpn = n.alpn if isinstance(n.alpn, str) else json.dumps(n.alpn)
+            conn.execute(
+                """INSERT INTO nodes(
+                     uri,proto,host,port,uuid,alter_id,password,method,sni,net,
+                     transport_mode,
+                     security,tls,path,host_header,flow,packet_encoding,fp,alpn,
+                     pbk,sid,spider_x,utls,
+                     skip_cert_verify,protocol,protocol_param,obfs,obfs_param,
+                     congestion_control,udp_relay_mode,
+                     country,latency_ms,download_speed,alive,source,first_seen,
+                     last_checked,content_hash,node_json,snapshot_id)
+                   VALUES(
+                     :uri,:proto,:host,:port,:uuid,:alter_id,:password,:method,
+                     :sni,:net,:transport_mode,:security,:tls,:path,:host_header,
+                     :flow,:packet_encoding,:fp,:alpn,:pbk,:sid,:spider_x,:utls,
+                     :skip_cert_verify,:protocol,:protocol_param,
+                     :obfs,:obfs_param,:congestion_control,:udp_relay_mode,
+                     NULL,NULL,NULL,NULL,:source,:first_seen,:last_checked,
+                     :content_hash,:node_json,NULL)""",
+                {
+                    "uri": n.raw,
+                    "proto": n.proto,
+                    "host": n.host,
+                    "port": n.port,
+                    "uuid": n.uuid,
+                    "alter_id": n.alter_id,
+                    "password": n.password,
+                    "method": n.method,
+                    "sni": n.sni,
+                    "net": n.net,
+                    "transport_mode": n.transport_mode,
+                    "security": n.security,
+                    "tls": None if n.tls is None else int(bool(n.tls)),
+                    "path": n.path,
+                    "host_header": n.host_header,
+                    "flow": n.flow,
+                    "packet_encoding": n.packet_encoding,
+                    "fp": n.fp,
+                    "alpn": scalar_alpn,
+                    "pbk": n.pbk,
+                    "sid": n.sid,
+                    "spider_x": n.spider_x,
+                    "utls": None if n.utls is None else int(bool(n.utls)),
+                    "skip_cert_verify": (
+                        None if n.skip_cert_verify is None else int(n.skip_cert_verify)
+                    ),
+                    "protocol": n.protocol,
+                    "protocol_param": n.protocol_param,
+                    "obfs": n.obfs,
+                    "obfs_param": n.obfs_param,
+                    "congestion_control": n.congestion_control,
+                    "udp_relay_mode": n.udp_relay_mode,
+                    "source": n.source,
+                    "first_seen": previous_first_seen.get(n.raw) or now,
+                    "last_checked": now,
+                    "content_hash": node_hash,
+                    "node_json": json.dumps(
+                        n.model_dump(mode="json"), ensure_ascii=False
+                    ),
+                },
+            )
+        # Activate both file projections while SQLite can still roll back.
+        # If either file or the final commit fails, restore every prior view.
+        if not fixture_mode:
+            sources_attempted = True
+            fetcher.save_sources(sources)
+        live_attempted = True
+        live_tmp.replace(LIVE)
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        live_tmp.unlink(missing_ok=True)
+        recovery_errors: list[str] = []
+        if live_attempted:
+            try:
+                restore_file(LIVE, live_original)
+            except Exception as recovery_exc:  # pragma: no cover - catastrophic I/O
+                recovery_errors.append(f"live.jsonl: {recovery_exc}")
+        if sources_attempted:
+            try:
+                restore_file(sources_path, sources_original)
+            except Exception as recovery_exc:  # pragma: no cover - catastrophic I/O
+                recovery_errors.append(f"sources.json: {recovery_exc}")
+        recovery_note = (
+            f"; recovery errors: {'; '.join(recovery_errors)}"
+            if recovery_errors
+            else ""
+        )
+        summary = {
+            "raw_nodes": len(raw_nodes),
+            "unique": len(unique),
+            "duplicates": len(dropped),
+            "success": False,
+            "error": f"snapshot activation failed: {e}{recovery_note}",
+        }
+        _write_last_run(1, {"parse": summary}, extra={"last_stage_cmd": "parse"})
+        return summary
+    finally:
+        conn.close()
 
     summary = {
         "raw_nodes": len(raw_nodes),
@@ -199,6 +466,7 @@ def _parse_logic() -> dict:
         "duplicates": len(dropped),
         "by_source": src_counts,
         "content_hash": chash,
+        "success": True,
     }
     _write_last_run(1, {"parse": summary}, extra={"last_stage_cmd": "parse"})
     return summary
@@ -215,21 +483,20 @@ def _load_quality() -> dict:
 
 
 def _find_speedtest_binary() -> str | None:
-    """Locate clash-speedtest.exe. Spec says C:\\Users\\user\\project\\go\\bin\\
-    but the real install is C:\\Users\\win10\\go\\bin\\. Check both + PATH."""
+    """Locate clash-speedtest without relying on a developer-specific home path."""
+    override = os.environ.get("CLASH_SPEEDTEST_BIN", "").strip()
+    if override and Path(override).is_file():
+        return override
+
     binary = shutil.which("clash-speedtest")
     if binary:
         return binary
-    import os
 
-    candidates = [
-        os.environ.get("GOPATH", r"C:\Users\win10\go") + r"\bin\clash-speedtest.exe",
-        r"C:\Users\user\project\go\bin\clash-speedtest.exe",
-        r"C:\Users\win10\go\bin\clash-speedtest.exe",
-    ]
-    for c in candidates:
-        if c and os.path.exists(c):
-            return c
+    executable = "clash-speedtest.exe" if os.name == "nt" else "clash-speedtest"
+    go_path = Path(os.environ.get("GOPATH", "").strip() or (Path.home() / "go"))
+    candidate = go_path / "bin" / executable
+    if candidate.is_file():
+        return str(candidate)
     return None
 
 
@@ -273,23 +540,8 @@ def _parse_latency(value: str) -> int | None:
 
 
 def _verify_logic(max_runtime: int | None = None) -> dict:
-    """Two-tier quality screening via clash-speedtest (Go, embedded mihomo).
-
-    Tier 1 (latency / fast mode): all nodes, --fast, batched (50/batch,
-    220s/batch). Keep latency < max_latency_ms as alive, backfill latency_ms.
-    Tier 2 (download mode): only Tier-1 alive nodes, no --fast, runs a 10 MB
-    download per node, filters by min_download_speed_mbps. Backfills
-    download_speed (MB/s). Then rewrites live.jsonl (alive first, sorted by
-    download_speed desc) and D1 (alive/latency_ms/download_speed/last_checked).
-    Falls back to stub (mark unverified) if binary missing.
-    """
-    binary = _find_speedtest_binary()
-    if not binary:
-        console.print(
-            "[yellow]clash-speedtest not found — marking nodes unverified, skipping"
-        )
-    else:
-        console.print(f"[green]clash-speedtest found at {binary}")
+    """Verify each full proxy configuration without sharing results by endpoint."""
+    import yaml as _yaml
 
     q = _load_quality()
     max_latency_ms = int(q.get("max_latency_ms", 1000))
@@ -297,455 +549,560 @@ def _verify_logic(max_runtime: int | None = None) -> dict:
     t1_conc = int(q.get("tier1_concurrent", 50))
     t2_conc = int(q.get("tier2_concurrent", 10))
     dl_size = int(q.get("download_size_bytes", 10485760))
-
+    probe_timeout_seconds = max(1, int(q.get("probe_timeout_seconds", 5)))
+    process_timeout_seconds = max(
+        probe_timeout_seconds + 5,
+        int(q.get("verifier_process_timeout_seconds", 30)),
+    )
     start_t = time.time()
-    timed_out = False
+    progress_file = STATE / "verify-progress.json"
 
     conn = _init_db()
     rows = conn.execute(
-        "SELECT uri,proto,host,port,uuid,password,sni,net,source,alive,latency_ms,download_speed FROM nodes"
+        """SELECT uri,node_json,source,alive,latency_ms,download_speed
+           FROM nodes ORDER BY id"""
     ).fetchall()
     conn.close()
 
     nodes: list[ProxyNode] = []
-    for r in rows:
-        uri, proto, host, port, uuid_, pwd, sni, net, source, alive, lat, dl = r
-        nodes.append(
-            ProxyNode(
-                proto=proto,
-                host=host,
-                port=port,
-                uuid=uuid_,
-                password=pwd,
-                sni=sni,
-                net=net,
-                raw=uri,
-                source=source,
-                alive=bool(alive) if alive is not None else None,
-                latency_ms=lat,
-                download_speed=dl,
-            )
-        )
-
-    # ensure clash.yaml exists (needed for name->host:port map + Tier1 batches)
-    clash_path = ROOT / "output" / "clash.yaml"
-    if not clash_path.exists() and binary:
+    for row in rows:
+        (
+            uri,
+            node_json,
+            source,
+            alive,
+            lat,
+            dl,
+        ) = row
         try:
-            emit.emit_all()
-        except Exception as e:
-            console.print(f"[yellow]emit clash.yaml failed (non-blocking): {e}")
-
-    # name -> host:port map (built across the full proxy set)
-    # C1 fix: clash-speedtest outputs proxy names exactly as written in clash.yaml,
-    # but emit_clash dedup-appends "-1"/"-2"/... to keep names unique. The names in
-    # clash.yaml (produced by emit.emit_all) therefore ALREADY carry those suffixes,
-    # and the names printed by clash-speedtest match them — so a straight name->hp
-    # map works. But as a defensive fallback, if a name lookup misses we also try
-    # stripping a trailing "-<digits>" suffix. Primary key is host:port (server:port),
-    # the name is only a back-reference for clash-speedtest output rows.
-    import re as _re
-
-    _NAME_SUFFIX_RE = _re.compile(r"-\d+$")
-
-    name_to_hp: dict[str, str] = {}
-    # also a host:port-keyed set of all proxies for sanity checks
-    all_proxies: list[dict] = []
-    try:
-        import yaml as _yaml
-
-        if clash_path.exists():
-            doc = _yaml.safe_load(clash_path.read_text(encoding="utf-8")) or {}
-            all_proxies = doc.get("proxies", []) or []
-            for p in all_proxies:
-                hp = f"{p.get('server')}:{p.get('port')}"
-                name_to_hp[p.get("name", "")] = hp
-    except Exception as e:
-        console.print(f"[yellow]load clash.yaml failed (non-blocking): {e}")
-
-    def _lookup_hp(name: str, table: dict[str, str]) -> str | None:
-        """Resolve a clash-speedtest output name to host:port.
-
-        Try the name as-is first; if that misses, strip a trailing "-<digits>"
-        dedup suffix (added by emit_clash) and retry. Returns None if unresolved.
-        """
-        if not name:
-            return None
-        hp = table.get(name)
-        if hp:
-            return hp
-        stripped = _NAME_SUFFIX_RE.sub("", name)
-        if stripped and stripped != name:
-            return table.get(stripped)
-        return None
-
-    tier1_alive: dict[str, int] = {}  # host:port -> latency_ms
-    tier2_speeds: dict[str, float] = {}  # host:port -> MB/s (declared early for resume)
-    tier2_tested_hps: set[str] = set()  # Tier-2 tested host:ports (resume)
-    reachable: set[str] = set()  # TCP-reachable host:ports (pre-filter, resume)
-
-    # ---- resume support ----
-    # A full verify of thousands of nodes can't finish inside one bash command
-    # (10-min cap) or a single CI job window. Persist per-batch progress to
-    # state/verify-progress.json and resume from the last completed batch on
-    # the next run. The fingerprint ties progress to the current node set; a
-    # fresh fetch/parse changes it and discards stale progress automatically.
-    PROGRESS_FILE = STATE / "verify-progress.json"
-
-    def _fingerprint() -> str:
-        if not all_proxies:
-            return "0"
-        return f"{len(all_proxies)}:{all_proxies[0].get('server', '')}:{all_proxies[-1].get('server', '')}"
-
-    resume_idx = 0
-    try:
-        if PROGRESS_FILE.exists():
-            p = json.loads(PROGRESS_FILE.read_text(encoding="utf-8"))
-            if p.get("fingerprint") == _fingerprint():
-                tier1_alive = dict(p.get("tier1_alive", {}))
-                tier2_speeds = dict(p.get("tier2_speeds", {}))
-                tier2_tested_hps = set(p.get("tier2_tested_hps", []))
-                reachable = set(p.get("reachable", []))
-                resume_idx = int(p.get("tier1_idx", 0))
-                console.print(
-                    f"[cyan]resuming verify from T1 idx={resume_idx} "
-                    f"(alive={len(tier1_alive)}, t2_speeds={len(tier2_speeds)})"
-                )
+            if node_json:
+                data = json.loads(node_json)
+                if not isinstance(data, dict):
+                    raise TypeError("node_json is not an object")
+                data.update({"raw": uri, "source": source})
+                node = ProxyNode(**data)
             else:
-                console.print("[dim]verify-progress fingerprint mismatch — fresh start")
+                node = parser.parse_uri(uri)
+                if node is None:
+                    raise ValueError("legacy URI cannot be parsed")
+                node.source = source
+            parser.validate_node_raw(node)
+        except Exception as exc:
+            summary = {
+                "completed": False,
+                "success": False,
+                "error": f"invalid database node at row {len(nodes) + 1}: {exc}",
+            }
+            _write_last_run(1, {"verify": summary}, extra={"last_stage_cmd": "verify"})
+            return summary
+        node.alive = bool(alive) if alive is not None else None
+        node.latency_ms = lat
+        node.download_speed = dl
+        nodes.append(node)
+
+    if not nodes:
+        summary = {"completed": False, "success": False, "error": "no nodes to verify"}
+        _write_last_run(1, {"verify": summary}, extra={"last_stage_cmd": "verify"})
+        return summary
+
+    binary = _find_speedtest_binary()
+    if not binary:
+        summary = {
+            "completed": False,
+            "success": False,
+            "unverified": len(nodes),
+            "error": "clash-speedtest not found",
+        }
+        _write_last_run(1, {"verify": summary}, extra={"last_stage_cmd": "verify"})
+        return summary
+    console.print(f"[green]clash-speedtest found at {binary}")
+
+    verifier_nodes = [node for node in nodes if not emit.clash_skip_reason(node)]
+    unsupported_nodes = [node for node in nodes if emit.clash_skip_reason(node)]
+    unsupported_uris = {node.raw for node in unsupported_nodes}
+    if not verifier_nodes:
+        summary = {
+            "completed": False,
+            "success": False,
+            "unsupported_for_verifier": len(unsupported_nodes),
+            "error": "no nodes are representable by the pinned Clash verifier",
+        }
+        _write_last_run(1, {"verify": summary}, extra={"last_stage_cmd": "verify"})
+        return summary
+
+    clash = emit.emit_clash(verifier_nodes)
+    all_proxies = clash.get("proxies", [])
+    if len(all_proxies) != len(verifier_nodes):
+        summary = {
+            "completed": False,
+            "success": False,
+            "error": (
+                "Clash conversion count mismatch: "
+                f"{len(all_proxies)} != {len(verifier_nodes)}"
+            ),
+        }
+        _write_last_run(1, {"verify": summary}, extra={"last_stage_cmd": "verify"})
+        return summary
+
+    name_to_uri = {
+        p["name"]: n.raw for p, n in zip(all_proxies, verifier_nodes, strict=True)
+    }
+    if len(name_to_uri) != len(verifier_nodes):
+        summary = {
+            "completed": False,
+            "success": False,
+            "error": "duplicate Clash names",
+        }
+        _write_last_run(1, {"verify": summary}, extra={"last_stage_cmd": "verify"})
+        return summary
+
+    fingerprint = hashlib.sha256(
+        json.dumps(
+            {
+                "progress_schema": VERIFY_PROGRESS_SCHEMA_VERSION,
+                "verifier_contract": "clash-speedtest-isolated-v4",
+                "quality": q,
+                "tier1_batch_size": TIER1_BATCH_SIZE,
+                "tier2_batch_size": TIER2_BATCH_SIZE,
+                "connections": [
+                    {"uri": n.raw, "proxy": p}
+                    for p, n in zip(all_proxies, verifier_nodes, strict=True)
+                ],
+                "unsupported": sorted(unsupported_uris),
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+
+    tier1_alive: dict[str, int] = {}
+    tier1_tested: set[str] = set()
+    tier2_speeds: dict[str, float] = {}
+    tier2_tested: set[str] = set()
+    reachable: set[str] = set()
+    resume_idx = 0
+    resumed = False
+
+    try:
+        if progress_file.exists():
+            saved = json.loads(progress_file.read_text(encoding="utf-8"))
+            if (
+                saved.get("schema_version") == VERIFY_PROGRESS_SCHEMA_VERSION
+                and saved.get("fingerprint") == fingerprint
+            ):
+                tier1_alive = {
+                    str(k): int(v) for k, v in saved.get("tier1_alive", {}).items()
+                }
+                tier1_tested = set(saved.get("tier1_tested", []))
+                tier2_speeds = {
+                    str(k): float(v) for k, v in saved.get("tier2_speeds", {}).items()
+                }
+                tier2_tested = set(saved.get("tier2_tested", []))
+                reachable = set(saved.get("reachable", []))
+                resume_idx = int(saved.get("tier1_idx", 0))
+                resumed = True
     except Exception as e:
-        console.print(f"[yellow]load verify-progress failed (non-blocking): {e}")
+        console.print(f"[yellow]discarding invalid verify progress: {e}")
 
-    def _save_progress(t1_idx: int) -> None:
-        try:
-            PROGRESS_FILE.write_text(
-                json.dumps(
-                    {
-                        "fingerprint": _fingerprint(),
-                        "tier1_alive": tier1_alive,
-                        "tier1_idx": t1_idx,
-                        "tier2_speeds": tier2_speeds,
-                        "tier2_tested_hps": list(tier2_tested_hps),
-                        "reachable": list(reachable),
-                    },
-                    ensure_ascii=False,
-                ),
-                encoding="utf-8",
-            )
-        except Exception:
-            pass
-
-    if binary and all_proxies:
-        # ---- TCP pre-filter: cheap connect gate before the expensive
-        # clash-speedtest pass. Only runs on a fresh start (resume_idx==0 and
-        # no saved reachable set); a resumed run reuses the reachable set from
-        # progress so tier1_idx stays consistent with the filtered ordering. ----
-        if resume_idx == 0 and not reachable:
-            # bootstrap-safe import: cli.py may run bare (no parent package),
-            # and src/ is already on sys.path via the module-top bootstrap.
-            from aggregator import tcp_prefilter
-
-            # Fresh start: clear stale alive/latency/speed from prior partial
-            # runs so total_alive reflects ONLY this run's measurements.
-            # (Without this, DB rows from earlier verifies inflate alive
-            # counts and pollute the partial publish.)
-            c = _init_db()
-            c.execute(
-                "UPDATE nodes SET alive=NULL, latency_ms=NULL, download_speed=NULL"
-            )
-            c.commit()
-            c.close()
-            for n in nodes:
-                n.alive = None
-                n.latency_ms = None
-                n.download_speed = None
-            console.print("[cyan]running TCP pre-filter (connect 443)...")
-            reachable = tcp_prefilter.run(all_proxies)
-            _save_progress(0)
-        filtered_proxies = (
-            [
-                p
-                for p in all_proxies
-                if f"{p.get('server')}:{p.get('port')}" in reachable
-            ]
-            if reachable
-            else list(all_proxies)
+    def save_progress(t1_idx: int) -> None:
+        tmp = progress_file.with_suffix(".json.tmp")
+        tmp.write_text(
+            json.dumps(
+                {
+                    "schema_version": VERIFY_PROGRESS_SCHEMA_VERSION,
+                    "fingerprint": fingerprint,
+                    "tier1_idx": t1_idx,
+                    "tier1_alive": tier1_alive,
+                    "tier1_tested": sorted(tier1_tested),
+                    "tier2_speeds": tier2_speeds,
+                    "tier2_tested": sorted(tier2_tested),
+                    "reachable": sorted(reachable),
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
         )
-        console.print(
-            f"[cyan]TCP pre-filter: {len(filtered_proxies)}/{len(all_proxies)} "
-            f"reachable -> Tier 1"
-        )
-        # ---- Tier 1: fast mode latency screening, batched ----
-        console.rule("[bold cyan]Tier 1 — latency screening (fast mode)")
-        BATCH1 = 50
-        TIMEOUT1 = 220
-        tmp1 = STATE / "_batch_t1.yaml"
-        # M3: track unparsed clash-speedtest rows so a silent parse failure surfaces.
-        unparsed_t1 = 0
+        tmp.replace(progress_file)
 
-        def _parse_t1(stdout: str) -> None:
-            nonlocal unparsed_t1
-            for line in (stdout or "").splitlines():
-                parts = line.split("\t")
-                # fast-mode row: 序号 / 节点名称 / 类型 / 延迟  (4 cols)
-                if len(parts) >= 4 and parts[0].strip().endswith("."):
-                    name = parts[1].strip()
-                    lat = _parse_latency(parts[3])
-                    hp = _lookup_hp(name, name_to_hp)
-                    if not hp or lat is None:
-                        unparsed_t1 += 1
-                        continue
-                    if lat < max_latency_ms:
-                        tier1_alive[hp] = lat
+    if not resumed:
+        from aggregator import tcp_prefilter
 
-        total = len(filtered_proxies)
-        for i in range(resume_idx, total, BATCH1):
-            if max_runtime and (time.time() - start_t) > max_runtime:
-                console.print(
-                    f"[yellow]max-runtime {max_runtime}s reached — pausing T1 at "
-                    f"idx={i}/{total}, alive={len(tier1_alive)} (resume next run)"
-                )
-                timed_out = True
-                break
-            chunk = filtered_proxies[i : i + BATCH1]
-            with tmp1.open("w", encoding="utf-8") as fh:
-                _yaml.safe_dump({"proxies": chunk}, fh, allow_unicode=True)
-            try:
-                proc = subprocess.run(
-                    [
-                        binary,
-                        "-c",
-                        str(tmp1),
-                        "-fast",
-                        "-f",
-                        ".+",
-                        "-concurrent",
-                        str(t1_conc),
-                    ],
-                    capture_output=True,
-                    text=True,
-                    timeout=TIMEOUT1,
-                    encoding="utf-8",
-                )
-                _parse_t1(proc.stdout)
-            except subprocess.TimeoutExpired:
-                console.print(
-                    f"[yellow]T1 batch {i}-{i+len(chunk)} timed out ({TIMEOUT1}s) — partial"
-                )
-            except Exception as e:
-                console.print(f"[yellow]T1 batch {i} failed (non-blocking): {e}")
-            console.print(
-                f"[dim]T1 batch {i}-{i+len(chunk)}/{total} done, alive={len(tier1_alive)}"
-            )
-            _save_progress(i + len(chunk))
-        tmp1.unlink(missing_ok=True)
-        _save_progress(total)  # Tier 1 fully done
-        console.print(f"[green]Tier 1 alive: {len(tier1_alive)}")
-        # M3: warn on unparsed clash-speedtest rows (likely a format drift).
-        if unparsed_t1:
-            console.print(
-                f"[yellow]WARNING: {unparsed_t1} Tier-1 speedtest rows could not be "
-                "matched to a host:port — verify clash-speedtest output format / name mapping"
-            )
-        # M3 sanity check: tier1_alive=0 with a large node set usually means parse
-        # failure rather than genuinely-dead nodes.
-        if not tier1_alive and len(filtered_proxies) > 100:
-            console.print(
-                "[yellow]WARNING: tier1_alive=0 but >100 nodes were tested — possible "
-                "clash-speedtest output parse failure (check row format)"
-            )
-
-    # apply Tier 1 to node objects
-    for n in nodes:
-        hp = f"{n.host}:{n.port}"
-        if hp in tier1_alive:
-            n.alive = True
-            n.latency_ms = tier1_alive[hp]
-            n.download_speed = None  # reset before Tier 2
-        elif not timed_out and binary and (tier1_alive or all_proxies):
-            n.alive = False
+        for n in nodes:
+            n.alive = None
             n.latency_ms = None
             n.download_speed = None
-        # timed_out: leave untested nodes alive=None so they resume next run
-        # and publish (non-strict) can still ship them as unverified.
+        console.print("[cyan]running TCP pre-filter...")
+        reachable = tcp_prefilter.run(all_proxies)
+        if not reachable:
+            summary = {
+                "completed": False,
+                "success": False,
+                "unverified": len(nodes),
+                "error": "TCP pre-filter returned no reachable endpoints",
+            }
+            _write_last_run(1, {"verify": summary}, extra={"last_stage_cmd": "verify"})
+            return summary
+        save_progress(0)
 
-    tier2_tested = 0
-    if binary and tier1_alive:
-        # ---- Tier 2: download mode speed test, only alive nodes, batched ----
-        console.rule("[bold cyan]Tier 2 — download speed test (download mode)")
-        alive_proxies = [
-            p
-            for p in all_proxies
-            if f"{p.get('server')}:{p.get('port')}" in tier1_alive
-        ]
-        # name -> host:port restricted to alive set (for Tier 2 output parsing)
-        name_to_hp_t2 = {
-            p.get("name", ""): f"{p.get('server')}:{p.get('port')}"
-            for p in alive_proxies
-        }
-        clash_alive = STATE / "clash_alive.yaml"
+    pairs = [
+        (p, n)
+        for p, n in zip(all_proxies, verifier_nodes, strict=True)
+        if f"{p.get('server')}:{p.get('port')}" in reachable
+    ]
+    filtered_proxies = [p for p, _ in pairs]
+    console.print(f"[cyan]TCP pre-filter: {len(pairs)}/{len(nodes)} reachable")
+
+    def run_isolated(proxy: dict, tier: int, sequence: int) -> dict:
+        """Run one proxy per verifier process so a stuck core cannot poison a wave."""
+        path = STATE / f"_verify_t{tier}_{sequence}_{uuid.uuid4().hex}.yaml"
         try:
-            with clash_alive.open("w", encoding="utf-8") as fh:
-                _yaml.safe_dump({"proxies": alive_proxies}, fh, allow_unicode=True)
-        except Exception as e:
-            console.print(f"[yellow]write clash_alive.yaml failed: {e}")
-
-        BATCH2 = 30
-        TIMEOUT2 = 300
-        tmp2 = STATE / "_batch_t2.yaml"
-        # M3: track unparsed Tier-2 rows too.
-        unparsed_t2 = 0
-
-        def _parse_t2(stdout: str) -> None:
-            nonlocal unparsed_t2
-            for line in (stdout or "").splitlines():
-                parts = line.split("\t")
-                # download-mode row: 序号 / 节点名称 / 类型 / 延迟 / 抖动 / 丢包率 / 下载速度 (7 cols)
-                if len(parts) >= 7 and parts[0].strip().endswith("."):
-                    name = parts[1].strip()
-                    spd = _parse_speed(parts[6])
-                    hp = _lookup_hp(name, name_to_hp_t2)
-                    if not hp or spd is None:
-                        unparsed_t2 += 1
-                        continue
-                    if spd >= min_dl_mbps:
-                        tier2_speeds[hp] = spd
-
-        total2 = len(alive_proxies)
-        for i in range(0, total2, BATCH2):
-            if max_runtime and (time.time() - start_t) > max_runtime:
-                console.print(
-                    f"[yellow]max-runtime {max_runtime}s reached — pausing T2 at "
-                    f"idx={i}/{total2}, passed={len(tier2_speeds)} (resume next run)"
+            with path.open("w", encoding="utf-8") as fh:
+                _yaml.safe_dump(
+                    {"proxies": [proxy]}, fh, allow_unicode=True, sort_keys=False
                 )
-                timed_out = True
-                break
-            batch = alive_proxies[i : i + BATCH2]
-            # skip proxies already tested in a prior (resumed) run
-            chunk = [
-                p
-                for p in batch
-                if f"{p.get('server')}:{p.get('port')}" not in tier2_tested_hps
+            args = [
+                binary,
+                "-c",
+                str(path),
+                "-rename=false",
+                "-f",
+                ".+",
+                "-concurrent",
+                "1",
+                "-timeout",
+                f"{probe_timeout_seconds}s",
             ]
-            tier2_tested += len(batch)
-            if not chunk:
-                continue
-            with tmp2.open("w", encoding="utf-8") as fh:
-                _yaml.safe_dump({"proxies": chunk}, fh, allow_unicode=True)
-            try:
-                proc = subprocess.run(
+            if tier == 1:
+                args.append("-fast")
+            else:
+                args.extend(
                     [
-                        binary,
-                        "-c",
-                        str(tmp2),
                         "-speed-mode",
                         "download",
-                        "-concurrent",
-                        str(t2_conc),
                         "-download-size",
                         str(dl_size),
                         "-max-latency",
-                        "1s",
+                        f"{max_latency_ms}ms",
                         "-min-download-speed",
                         str(min_dl_mbps),
-                    ],
+                    ]
+                )
+            try:
+                proc = subprocess.run(
+                    args,
                     capture_output=True,
                     text=True,
-                    timeout=TIMEOUT2,
+                    timeout=process_timeout_seconds,
                     encoding="utf-8",
+                    errors="replace",
                 )
-                _parse_t2(proc.stdout)
             except subprocess.TimeoutExpired:
-                console.print(
-                    f"[yellow]T2 batch {i}-{i+len(chunk)} timed out ({TIMEOUT2}s) — partial"
+                return {"kind": "isolated_failure", "reason": "timed out"}
+            except Exception as exc:
+                return {"kind": "fatal", "reason": str(exc)}
+        finally:
+            path.unlink(missing_ok=True)
+
+        if proc.returncode != 0:
+            return {
+                "kind": "isolated_failure",
+                "reason": f"exit {proc.returncode}: {proc.stderr[-300:]}",
+            }
+
+        expected_uri = name_to_uri[proxy["name"]]
+        recognized = 0
+        unknown_names = 0
+        metric: int | float | None = None
+        for line in proc.stdout.splitlines():
+            parts = line.split("\t")
+            required = 4 if tier == 1 else 7
+            if len(parts) < required or not parts[0].strip().endswith("."):
+                continue
+            uri = name_to_uri.get(parts[1].strip())
+            if uri != expected_uri:
+                unknown_names += 1
+                continue
+            recognized += 1
+            metric = _parse_latency(parts[3]) if tier == 1 else _parse_speed(parts[6])
+        if unknown_names or recognized != 1:
+            return {
+                "kind": "contract",
+                "reason": (
+                    f"unknown_names={unknown_names}, recognized_rows={recognized}"
+                ),
+            }
+        return {"kind": "ok", "metric": metric}
+
+    error: str | None = None
+    timed_out = False
+    isolated_t1_failures = 0
+    isolated_t2_failures = 0
+    t1_complete = False
+    batch1 = TIER1_BATCH_SIZE
+    for i in range(resume_idx, len(filtered_proxies), batch1):
+        if max_runtime and time.time() - start_t >= max_runtime:
+            timed_out = True
+            save_progress(i)
+            break
+        chunk = filtered_proxies[i : i + batch1]
+        workers = max(1, min(t1_conc, len(chunk)))
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            results = list(
+                executor.map(
+                    lambda item: run_isolated(item[1], 1, i + item[0]),
+                    enumerate(chunk),
                 )
-            except Exception as e:
-                console.print(f"[yellow]T2 batch {i} failed (non-blocking): {e}")
-            # mark this window's proxies tested (resume skips them next run)
-            for p in batch:
-                tier2_tested_hps.add(f"{p.get('server')}:{p.get('port')}")
-            console.print(
-                f"[dim]T2 batch {i}-{i+len(batch)}/{total2} done, passed={len(tier2_speeds)}"
             )
-            _save_progress(total)
-        tmp2.unlink(missing_ok=True)
-        console.print(
-            f"[green]Tier 2 passed (>= {min_dl_mbps} MB/s): {len(tier2_speeds)}"
+        contract_error = next(
+            (result for result in results if result["kind"] in {"fatal", "contract"}),
+            None,
         )
-        if unparsed_t2:
-            console.print(
-                f"[yellow]WARNING: {unparsed_t2} Tier-2 speedtest rows could not be "
-                "matched to a host:port — verify clash-speedtest output format"
-            )
+        if contract_error:
+            error = f"Tier-1 verifier error at wave {i}: {contract_error['reason']}"
+            save_progress(i)
+            break
+        successful = sum(result["kind"] == "ok" for result in results)
+        failed = len(results) - successful
+        if failed and not successful:
+            error = f"Tier-1 wave {i} had no successful verifier process"
+            save_progress(i)
+            break
 
-    # apply Tier 2 speeds to node objects
+        expected = {name_to_uri[p["name"]] for p in chunk}
+        tier1_tested.difference_update(expected)
+        for uri in expected:
+            tier1_alive.pop(uri, None)
+        tier1_tested.update(expected)
+        for proxy, result in zip(chunk, results, strict=True):
+            if result["kind"] != "ok":
+                continue
+            latency = result["metric"]
+            if isinstance(latency, int) and latency < max_latency_ms:
+                tier1_alive[name_to_uri[proxy["name"]]] = latency
+        isolated_t1_failures += failed
+        resume_idx = i + len(chunk)
+        save_progress(resume_idx)
+    else:
+        t1_complete = True
+        save_progress(len(filtered_proxies))
+
+    # TCP-unreachable endpoints are known dead; reachable but untested remain None.
     for n in nodes:
+        if n.raw in unsupported_uris:
+            n.alive = False
+            n.latency_ms = None
+            n.download_speed = None
+            continue
         hp = f"{n.host}:{n.port}"
-        if hp in tier2_speeds:
-            n.download_speed = tier2_speeds[hp]
+        if hp not in reachable:
+            n.alive = False
+            n.latency_ms = None
+            n.download_speed = None
+        elif n.raw in tier1_tested:
+            n.alive = n.raw in tier1_alive
+            n.latency_ms = tier1_alive.get(n.raw)
+            n.download_speed = None
+        else:
+            n.alive = None
+            n.latency_ms = None
+            n.download_speed = None
 
-    # write D1 (alive / latency_ms / download_speed / last_checked)
-    conn = _init_db()
-    now = _now()
-    for n in nodes:
-        if n.alive is not None:
-            conn.execute(
-                "UPDATE nodes SET alive=?, latency_ms=?, download_speed=?, last_checked=? WHERE uri=?",
-                (1 if n.alive else 0, n.latency_ms, n.download_speed, now, n.raw),
+    if t1_complete and not tier1_alive and len(filtered_proxies) > 100:
+        error = "Tier-1 returned zero alive nodes for a large snapshot"
+        t1_complete = False
+
+    alive_proxies = [p for p in all_proxies if name_to_uri[p["name"]] in tier1_alive]
+    t2_complete = not alive_proxies
+    if t1_complete and not error and alive_proxies:
+        for i in range(0, len(alive_proxies), TIER2_BATCH_SIZE):
+            if max_runtime and time.time() - start_t >= max_runtime:
+                timed_out = True
+                break
+            batch = alive_proxies[i : i + TIER2_BATCH_SIZE]
+            chunk = [p for p in batch if name_to_uri[p["name"]] not in tier2_tested]
+            if not chunk:
+                continue
+            workers = max(1, min(t2_conc, len(chunk)))
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                results = list(
+                    executor.map(
+                        lambda item: run_isolated(item[1], 2, i + item[0]),
+                        enumerate(chunk),
+                    )
+                )
+            contract_error = next(
+                (
+                    result
+                    for result in results
+                    if result["kind"] in {"fatal", "contract"}
+                ),
+                None,
             )
-    conn.commit()
-    conn.close()
+            if contract_error:
+                error = f"Tier-2 verifier error at wave {i}: {contract_error['reason']}"
+                break
+            successful = sum(result["kind"] == "ok" for result in results)
+            failed = len(results) - successful
+            if failed and not successful:
+                error = f"Tier-2 wave {i} had no successful verifier process"
+                break
 
-    # write live.jsonl: alive first, sorted by download_speed desc
-    LIVE.parent.mkdir(parents=True, exist_ok=True)
+            expected = {name_to_uri[p["name"]] for p in chunk}
+            tier2_tested.difference_update(expected)
+            for uri in expected:
+                tier2_speeds.pop(uri, None)
+            tier2_tested.update(expected)
+            for proxy, result in zip(chunk, results, strict=True):
+                if result["kind"] != "ok":
+                    continue
+                speed = result["metric"]
+                if isinstance(speed, (int, float)) and speed >= min_dl_mbps:
+                    tier2_speeds[name_to_uri[proxy["name"]]] = float(speed)
+            isolated_t2_failures += failed
+            save_progress(len(filtered_proxies))
+        else:
+            t2_complete = True
 
-    def _sort_key(n: ProxyNode):
-        # alive first; within alive, download_speed desc (None last);
-        # tiebreak latency_ms asc.
-        return (
-            0 if n.alive else 1,
+    for n in nodes:
+        if n.raw in tier2_speeds:
+            n.download_speed = tier2_speeds[n.raw]
+
+    completed = bool(t1_complete and t2_complete and not timed_out and not error)
+    if not completed:
+        summary = {
+            "tier1_tested": len(tier1_tested),
+            "tier1_alive": len(tier1_alive),
+            "tier2_tested": len(tier2_tested),
+            "tier2_passed": len(tier2_speeds),
+            "isolated_tier1_failures": isolated_t1_failures,
+            "isolated_tier2_failures": isolated_t2_failures,
+            "unsupported_for_verifier": len(unsupported_nodes),
+            "total_alive": sum(n.alive is True for n in nodes),
+            "unverified": sum(n.alive is None for n in nodes),
+            "completed": False,
+            "success": False,
+            "error": error or "max runtime reached; progress saved",
+        }
+        _write_last_run(1, {"verify": summary}, extra={"last_stage_cmd": "verify"})
+        return summary
+
+    nodes_sorted = sorted(
+        nodes,
+        key=lambda n: (
+            0 if n.alive is True else 1 if n.alive is None else 2,
             -(n.download_speed or 0.0),
             n.latency_ms if n.latency_ms is not None else 10**9,
-        )
+        ),
+    )
+    live_tmp = LIVE.with_suffix(".jsonl.tmp")
+    try:
+        with live_tmp.open("w", encoding="utf-8", newline="\n") as f:
+            for n in nodes_sorted:
+                f.write(
+                    json.dumps(n.model_dump(mode="json"), ensure_ascii=False) + "\n"
+                )
+    except Exception as exc:
+        live_tmp.unlink(missing_ok=True)
+        summary = {
+            "tier1_tested": len(tier1_tested),
+            "tier1_alive": len(tier1_alive),
+            "tier2_tested": len(tier2_tested),
+            "tier2_passed": len(tier2_speeds),
+            "isolated_tier1_failures": isolated_t1_failures,
+            "isolated_tier2_failures": isolated_t2_failures,
+            "total_alive": sum(n.alive is True for n in nodes),
+            "unverified": sum(n.alive is None for n in nodes),
+            "completed": False,
+            "success": False,
+            "error": f"live snapshot staging failed: {exc}",
+        }
+        _write_last_run(1, {"verify": summary}, extra={"last_stage_cmd": "verify"})
+        return summary
 
-    nodes_sorted = sorted(nodes, key=_sort_key)
-    with LIVE.open("w", encoding="utf-8") as f:
-        for n in nodes_sorted:
-            if n.alive is None and n.name and "[unverified]" not in n.name:
-                n.name = (n.name or "") + " [unverified]"
-            f.write(json.dumps(n.model_dump(), ensure_ascii=False) + "\n")
+    now = _now()
+    live_original = LIVE.read_bytes() if LIVE.exists() else None
+    live_attempted = False
+    conn = _init_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        for n in nodes:
+            conn.execute(
+                """UPDATE nodes
+                   SET alive=?, latency_ms=?, download_speed=?, last_checked=?, node_json=?
+                   WHERE uri=?""",
+                (
+                    None if n.alive is None else int(n.alive),
+                    n.latency_ms,
+                    n.download_speed,
+                    now,
+                    json.dumps(n.model_dump(mode="json"), ensure_ascii=False),
+                    n.raw,
+                ),
+            )
+        live_attempted = True
+        live_tmp.replace(LIVE)
+        conn.commit()
+    except Exception as exc:
+        conn.rollback()
+        recovery_error: str | None = None
+        if live_attempted:
+            try:
+                current = LIVE.read_bytes() if LIVE.exists() else None
+                if current != live_original:
+                    if live_original is None:
+                        LIVE.unlink(missing_ok=True)
+                    else:
+                        restore = LIVE.with_suffix(".jsonl.restore")
+                        restore.write_bytes(live_original)
+                        restore.replace(LIVE)
+            except Exception as recovery_exc:  # pragma: no cover - catastrophic I/O
+                recovery_error = str(recovery_exc)
+        summary = {
+            "tier1_tested": len(tier1_tested),
+            "tier1_alive": len(tier1_alive),
+            "tier2_tested": len(tier2_tested),
+            "tier2_passed": len(tier2_speeds),
+            "isolated_tier1_failures": isolated_t1_failures,
+            "isolated_tier2_failures": isolated_t2_failures,
+            "total_alive": sum(n.alive is True for n in nodes),
+            "unverified": sum(n.alive is None for n in nodes),
+            "completed": False,
+            "success": False,
+            "error": (
+                f"verification snapshot activation failed: {exc}"
+                + (f"; recovery error: {recovery_error}" if recovery_error else "")
+            ),
+        }
+        _write_last_run(1, {"verify": summary}, extra={"last_stage_cmd": "verify"})
+        return summary
+    finally:
+        conn.close()
+        live_tmp.unlink(missing_ok=True)
 
-    tier2_passed = len(tier2_speeds)
-    total_alive = sum(1 for n in nodes if n.alive)
     summary = {
+        "tier1_tested": len(tier1_tested),
         "tier1_alive": len(tier1_alive),
-        "tier2_tested": tier2_tested,
-        "tier2_passed": tier2_passed,
-        "total_alive": total_alive,
-        "unverified": sum(1 for n in nodes if n.alive is None),
+        "tier2_tested": len(tier2_tested),
+        "tier2_passed": len(tier2_speeds),
+        "isolated_tier1_failures": isolated_t1_failures,
+        "isolated_tier2_failures": isolated_t2_failures,
+        "unsupported_for_verifier": len(unsupported_nodes),
+        "total_alive": sum(n.alive is True for n in nodes),
+        "unverified": sum(n.alive is None for n in nodes),
+        "completed": True,
+        "success": True,
+        # Bind a later emit invocation to this exact private live snapshot.
+        # The digest is metadata only and is not exposed by the public status.
+        "live_snapshot_sha256": hashlib.sha256(LIVE.read_bytes()).hexdigest(),
     }
-    summary["completed"] = not timed_out
-    if not timed_out:
-        # verify completed fully — clear resume progress so the next run starts fresh
-        try:
-            (STATE / "verify-progress.json").unlink(missing_ok=True)
-        except Exception:
-            pass
-    else:
-        console.print("[yellow]verify paused (partial) — progress saved for resume")
+    progress_file.unlink(missing_ok=True)
     _write_last_run(1, {"verify": summary}, extra={"last_stage_cmd": "verify"})
     return summary
 
 
 def _publish_logic(strict: bool = False) -> dict:
-    """Publish top-N alive nodes (by download_speed) to the Cloudflare Worker.
-
-    Non-strict (default, used by fetch.yml): publish alive=True + alive=None
-    (unverified), exclude only alive=False (dead). This keeps the Worker fresh
-    even before verify-daily runs. --strict requires alive=True + download_speed
-    >= min_download_speed_mbps, used after verify for quality filtering.
-    """
-    import base64 as _b64
-
+    """Publish one complete, verified snapshot to the Cloudflare Worker."""
     import httpx
 
     q = _load_quality()
@@ -753,146 +1110,190 @@ def _publish_logic(strict: bool = False) -> dict:
     top_n = int(q.get("top_n_publish", 100))
 
     if not LIVE.exists():
-        summary = {"published": 0, "error": "no live.jsonl"}
+        summary = {"published": 0, "success": False, "error": "no live.jsonl"}
         _write_last_run(1, {"publish": summary}, extra={"last_stage_cmd": "publish"})
         return summary
 
-    # load all nodes once; select twice (strict first, non-strict fallback)
     all_nodes: list[ProxyNode] = []
+    invalid_lines = 0
     for line in LIVE.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if not line:
             continue
         try:
-            all_nodes.append(ProxyNode(**json.loads(line)))
+            document = json.loads(line)
+            if not isinstance(document, dict):
+                raise TypeError("record is not an object")
+            node = ProxyNode(**document)
+            parser.validate_node_raw(node)
+            all_nodes.append(node)
         except Exception:
-            continue
+            invalid_lines += 1
 
-    def _select(strict_mode: bool) -> list[ProxyNode]:
-        out: list[ProxyNode] = []
-        for n in all_nodes:
-            if n.alive is False:
-                continue
-            if n.alive is None:
-                if strict_mode:
-                    continue
-            if strict_mode and (n.download_speed is None or n.download_speed < min_dl):
-                continue
-            out.append(n)
-        return out
-
-    selected = _select(strict)
-    # M3 clobber-bug fix: if strict yields nothing (verify crashed / fresh
-    # parse all-None), fall back to non-strict so /sub never empties.
-    fell_back = False
-    if not selected and strict:
-        console.print(
-            "[yellow]strict publish yielded 0 nodes — falling back to non-strict "
-            "(verify may have failed or produced no alive nodes)"
-        )
-        selected = _select(False)
-        fell_back = True
-
-    dead_count = sum(1 for n in all_nodes if n.alive is False)
-    none_alive_count = sum(1 for n in all_nodes if n.alive is None)
-    if none_alive_count:
-        console.print(
-            f"[yellow]WARNING: {none_alive_count} nodes alive=None (unverified)"
-        )
-    if dead_count:
-        console.print(f"[dim]{dead_count} nodes alive=False (dead), excluded")
-
-    selected.sort(key=lambda n: -(n.download_speed or 0.0))
-    selected = selected[:top_n]
-
-    if not selected:
-        summary = {"published": 0, "error": "no qualifying alive nodes"}
+    if invalid_lines:
+        summary = {
+            "published": 0,
+            "success": False,
+            "error": f"live.jsonl contains {invalid_lines} invalid records",
+        }
         _write_last_run(1, {"publish": summary}, extra={"last_stage_cmd": "publish"})
         return summary
 
-    uris = "\n".join(n.raw for n in selected)
-    payload = _b64.b64encode(uris.encode("utf-8")).decode("ascii")
+    selected = [n for n in all_nodes if n.alive is True]
+    if strict:
+        selected = [
+            n
+            for n in selected
+            if n.download_speed is not None and n.download_speed >= min_dl
+        ]
+    selected.sort(
+        key=lambda n: (
+            -(n.download_speed if n.download_speed is not None else -1.0),
+            n.latency_ms if n.latency_ms is not None else 10**9,
+            n.raw,
+        )
+    )
+    selected = selected[:top_n]
 
-    import os as _os
+    if not selected:
+        summary = {
+            "published": 0,
+            "success": False,
+            "strict": strict,
+            "error": "no qualifying verified nodes; existing Worker snapshot retained",
+        }
+        _write_last_run(1, {"publish": summary}, extra={"last_stage_cmd": "publish"})
+        return summary
 
-    base = _os.environ.get(
-        "WORKER_URL", "https://proxy-sub-aggregator.proxy-aggregator.workers.dev"
-    ).rstrip("/")
+    base = os.environ.get("WORKER_URL", "").strip().rstrip("/")
+    if not base:
+        summary = {
+            "published": 0,
+            "success": False,
+            "strict": strict,
+            "error": "WORKER_URL env not set",
+        }
+        _write_last_run(1, {"publish": summary}, extra={"last_stage_cmd": "publish"})
+        return summary
+    parsed_worker_url = urlparse(base)
+    loopback = parsed_worker_url.hostname in {"localhost", "127.0.0.1", "::1"}
+    secure_transport = parsed_worker_url.scheme.lower() == "https"
+    local_development = parsed_worker_url.scheme.lower() == "http" and loopback
+    if (
+        not parsed_worker_url.hostname
+        or parsed_worker_url.username is not None
+        or parsed_worker_url.password is not None
+        or not (secure_transport or local_development)
+    ):
+        summary = {
+            "published": 0,
+            "success": False,
+            "strict": strict,
+            "error": (
+                "WORKER_URL must use HTTPS; HTTP is permitted only for a "
+                "loopback development endpoint"
+            ),
+        }
+        _write_last_run(1, {"publish": summary}, extra={"last_stage_cmd": "publish"})
+        return summary
     worker_url = f"{base}/admin/import"
-    token = _os.environ.get("ADMIN_TOKEN")
+    token = os.environ.get("ADMIN_TOKEN")
     if not token:
         console.print(
             "[red]ADMIN_TOKEN env not set — refusing to publish. Set it in GitHub "
             "Secrets (CI) or .env (local). The Worker admin token must NOT be "
             "hardcoded (repo is public)."
         )
-        summary = {"published": 0, "error": "ADMIN_TOKEN env not set"}
+        summary = {
+            "published": 0,
+            "success": False,
+            "error": "ADMIN_TOKEN env not set",
+        }
         _write_last_run(1, {"publish": summary}, extra={"last_stage_cmd": "publish"})
         return summary
 
+    snapshot_id = f"{int(time.time())}-{uuid.uuid4().hex}"
+    payload = {
+        "version": 1,
+        "snapshot_id": snapshot_id,
+        "expected_count": len(selected),
+        "nodes": [
+            {
+                "uri": n.raw,
+                "alive": True,
+                "latency_ms": n.latency_ms,
+                "download_speed": n.download_speed,
+                "model": n.model_dump(mode="json"),
+            }
+            for n in selected
+        ],
+    }
     try:
         resp = httpx.post(
             worker_url,
-            content=payload,
+            json=payload,
             headers={
                 "X-Admin-Token": token,
-                "Content-Type": "text/plain",
+                "Content-Type": "application/json",
             },
             timeout=120.0,
         )
-        body = resp.text
-        ok = 200 <= resp.status_code < 300
+        body = resp.text[:1000]
+        if not 200 <= resp.status_code < 300:
+            raise RuntimeError(f"Worker import HTTP {resp.status_code}: {body}")
+        try:
+            result = resp.json()
+        except ValueError as e:
+            raise RuntimeError("Worker import returned non-JSON response") from e
+        ok = (
+            result.get("ok") is True
+            and result.get("complete") is True
+            and result.get("snapshot_id") == snapshot_id
+            and result.get("imported") == len(selected)
+            and result.get("expected") == len(selected)
+            and result.get("model_persisted") is True
+        )
+        if not ok:
+            raise RuntimeError(f"Worker import contract mismatch: {body}")
         console.print(
-            f"[{'green' if ok else 'red'}]Worker import HTTP {resp.status_code}: {body[:300]}"
+            f"[green]Worker snapshot {snapshot_id} imported: {len(selected)} nodes"
         )
         summary = {
             "published": len(selected),
             "http_status": resp.status_code,
-            "worker_response": body[:500],
+            "snapshot_id": snapshot_id,
             "strict": strict,
-            "fell_back_to_nonstrict": fell_back,
+            "success": True,
         }
-        if not ok:
-            summary["error"] = f"HTTP {resp.status_code}"
     except Exception as e:
         console.print(f"[red]publish POST failed: {e}")
-        summary = {"published": 0, "error": str(e)}
-
-    # KV cache purge (optional) — rely on 60s TTL by default; best-effort.
-    try:
-        subprocess.run(
-            [
-                "cmd",
-                "/c",
-                "npx",
-                "wrangler",
-                "kv",
-                "key",
-                "delete",
-                "sub-render",
-                "--namespace-id=a8cc252082fc4736b5e9ce897cd33f37",
-            ],
-            cwd=str(ROOT / "src" / "worker"),
-            capture_output=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=60,
-        )
-    except Exception:
-        pass  # KV purge is best-effort; 60s TTL covers it
+        summary = {
+            "published": 0,
+            "success": False,
+            "strict": strict,
+            "snapshot_id": snapshot_id,
+            "error": str(e),
+        }
 
     _write_last_run(1, {"publish": summary}, extra={"last_stage_cmd": "publish"})
     return summary
 
 
 # ---- typer commands ----
+def _ensure_success(stage: str, summary: dict) -> None:
+    """Turn structured stage failures into a non-zero CLI exit status."""
+    if summary.get("success") is False or summary.get("error"):
+        console.print(f"[red]{stage} failed: {summary.get('error', 'unknown error')}")
+        raise typer.Exit(code=1)
+
+
 @app.command()
 def fetch() -> None:
     """Fetch enabled sources into state/staging.jsonl."""
     console.rule("[bold cyan]fetch")
     summary = _fetch_logic()
     _print_table("fetch summary", summary)
-    console.print(f"[green]done: {summary}")
+    _ensure_success("fetch", summary)
 
 
 @app.command()
@@ -901,6 +1302,7 @@ def parse() -> None:
     console.rule("[bold cyan]parse")
     summary = _parse_logic()
     _print_table("parse summary", summary)
+    _ensure_success("parse", summary)
 
 
 @app.command()
@@ -916,15 +1318,49 @@ def verify(
     console.rule("[bold yellow]verify (Tier1 latency + Tier2 download)")
     summary = _verify_logic(max_runtime=max_runtime or None)
     _print_table("verify summary", summary)
+    _ensure_success("verify", summary)
 
 
 @app.command(name="emit")
 def emit_cmd() -> None:
-    """Emit live.jsonl -> output/ (clash.yaml, singbox.json, v2ray-base64.txt)."""
+    """Emit the verified live snapshot and sanitized public pipeline status."""
     console.rule("[bold green]emit")
-    summary = emit.emit_all()
+    verify_summary, status_error = _load_completed_verify_summary()
+    if verify_summary is None:
+        summary = {
+            "nodes": 0,
+            "clash_proxies": 0,
+            "singbox_outbounds": 0,
+            "rss_items": 0,
+            "success": False,
+            "error": status_error or "preceding verify metadata is unavailable",
+        }
+    else:
+        summary = emit.emit_all(verify_summary=verify_summary)
     _write_last_run(1, {"emit": summary}, extra={"last_stage_cmd": "emit"})
     _print_table("emit summary", summary)
+    _ensure_success("emit", summary)
+
+
+@app.command(name="validate-output-status")
+def validate_output_status_cmd(
+    require_healthy: bool = typer.Option(
+        True,
+        "--require-healthy/--allow-unknown",
+        help="Require the CI-produced healthy state instead of a bootstrap unknown state.",
+    ),
+) -> None:
+    """Validate pipeline-status.json and its public artifact count contract."""
+
+    console.rule("[bold green]validate output status")
+    try:
+        summary = emit.validate_pipeline_status_artifact(
+            require_healthy=require_healthy
+        )
+    except emit.InvalidPipelineStatus as exc:
+        summary = {"success": False, "error": str(exc)}
+    _print_table("pipeline status validation", summary)
+    _ensure_success("validate-output-status", summary)
 
 
 @app.command()
@@ -932,13 +1368,44 @@ def publish(
     strict: bool = typer.Option(
         False,
         "--strict",
-        help="Only publish verified alive nodes (post-verify). Default: also publish unverified.",
-    )
+        help="Require the configured download-speed floor. Both modes exclude unverified nodes.",
+    ),
 ) -> None:
     """Publish top-N alive nodes (by download_speed) to the Cloudflare Worker."""
     console.rule("[bold magenta]publish")
     summary = _publish_logic(strict=strict)
     _print_table("publish summary", summary)
+    _ensure_success("publish", summary)
+
+
+@app.command()
+def dashboard(
+    host: str = typer.Option(
+        "127.0.0.1",
+        "--host",
+        help="Loopback address used by the local dashboard server.",
+    ),
+    port: int = typer.Option(
+        8765,
+        "--port",
+        min=0,
+        max=65535,
+        help="Local TCP port. Use 0 to select an available port.",
+    ),
+    open_browser: bool = typer.Option(
+        False,
+        "--open/--no-open",
+        help="Open the dashboard URL in the default browser after startup.",
+    ),
+) -> None:
+    """Run the loopback-only operations dashboard and node IP checker."""
+    from dashboard.server import serve
+
+    try:
+        serve(ROOT, host=host, port=port, open_browser=open_browser)
+    except (OSError, ValueError) as exc:
+        console.print(f"[red]dashboard failed: {exc}")
+        raise typer.Exit(code=2) from exc
 
 
 @app.command(name="github-dork")
@@ -951,6 +1418,7 @@ def github_dork_cmd() -> None:
     # flat top-level {stage,counts,last_stage_cmd} stays consistent.
     github_dork._update_last_run(summary)
     _print_table("github-dork summary", summary)
+    _ensure_success("github-dork", summary)
 
 
 @app.command(name="publish-resin")
@@ -962,6 +1430,7 @@ def publish_resin() -> None:
         1, {"publish-resin": summary}, extra={"last_stage_cmd": "publish-resin"}
     )
     _print_table("resin summary", summary)
+    _ensure_success("publish-resin", summary)
 
 
 def _publish_self_logic() -> dict:
@@ -988,6 +1457,7 @@ def publish_self() -> None:
         1, {"publish-self": summary}, extra={"last_stage_cmd": "publish-self"}
     )
     _print_table("self-owned summary", summary)
+    _ensure_success("publish-self", summary)
 
 
 @app.command(name="ct-recon")
@@ -997,13 +1467,14 @@ def ct_recon_cmd() -> None:
     summary = ct_recon.run()
     _write_last_run(1, {"ct-recon": summary}, extra={"last_stage_cmd": "ct-recon"})
     _print_table("ct-recon summary", summary)
+    _ensure_success("ct-recon", summary)
 
 
 @app.command(name="v2board-recon")
 def v2board_recon_cmd(
     exploit: bool = typer.Option(
         False, "--exploit", help="exploit mode (ONLY self-owned/authorized targets)"
-    )
+    ),
 ) -> None:
     """Stage 17 (A2): V2Board/Xboard fingerprint (recon) + CVE-2026-39912 chain
     (exploit, only against config/v2board_targets.yaml self-owned targets)."""
@@ -1014,6 +1485,7 @@ def v2board_recon_cmd(
         1, {"v2board-recon": summary}, extra={"last_stage_cmd": "v2board-recon"}
     )
     _print_table("v2board-recon summary", summary)
+    _ensure_success("v2board-recon", summary)
 
 
 @app.command(name="tg-recon")
@@ -1023,43 +1495,41 @@ def tg_recon_cmd() -> None:
     summary = tg_recon.run()
     _write_last_run(1, {"tg-recon": summary}, extra={"last_stage_cmd": "tg-recon"})
     _print_table("tg-recon summary", summary)
+    _ensure_success("tg-recon", summary)
 
 
 @app.command(name="all")
 def all_cmd() -> None:
-    """fetch -> parse -> verify -> emit -> publish -> publish-resin -> publish-self (CI entrypoint)."""
+    """Run the fail-closed core pipeline; optional gray/self pools stay explicit."""
     console.rule("[bold magenta]all (full pipeline)")
     counts: dict[str, dict] = {}
 
     console.print("[bold cyan]== fetch ==")
     counts["fetch"] = _fetch_logic()
     console.print(f"  {counts['fetch']}")
+    _ensure_success("fetch", counts["fetch"])
 
     console.print("[bold cyan]== parse ==")
     counts["parse"] = _parse_logic()
     console.print(
         f"  raw={counts['parse'].get('raw_nodes')} unique={counts['parse'].get('unique')}"
     )
+    _ensure_success("parse", counts["parse"])
 
     console.print("[bold cyan]== verify (Tier1+Tier2) ==")
     counts["verify"] = _verify_logic()
     console.print(f"  {counts['verify']}")
+    _ensure_success("verify", counts["verify"])
 
     console.print("[bold cyan]== emit ==")
-    counts["emit"] = emit.emit_all()
+    counts["emit"] = emit.emit_all(verify_summary=counts["verify"])
     console.print(f"  {counts['emit']}")
+    _ensure_success("emit", counts["emit"])
 
     console.print("[bold cyan]== publish ==")
     counts["publish"] = _publish_logic(strict=True)
     console.print(f"  {counts['publish']}")
-
-    console.print("[bold cyan]== publish-resin ==")
-    counts["publish-resin"] = resin_publisher.run()
-    console.print(f"  {counts['publish-resin']}")
-
-    console.print("[bold cyan]== publish-self ==")
-    counts["publish-self"] = _publish_self_logic()
-    console.print(f"  {counts['publish-self']}")
+    _ensure_success("publish", counts["publish"])
 
     _print_table(
         "all summary",

@@ -1,31 +1,210 @@
 name: deploy-pages
 
-on:
+# The privileged job accepts only a successful same-repository default-branch
+# run, downloads by exact run ID, and byte-compares artifacts to the pushed commit.
+on: # zizmor: ignore[dangerous-triggers] Same-repo/default/success gate plus exact run-ID artifact and commit byte-check.
   workflow_run:
-    workflows: ['fetch-and-publish']
+    workflows: ['fetch-and-publish', 'verify-daily']
     types: [completed]
   workflow_dispatch:
 
 permissions:
   contents: read
+  actions: read
+
+concurrency:
+  group: deploy-pages-${{ github.event.repository.default_branch }}
+  cancel-in-progress: true
 
 jobs:
   deploy:
+    if: >-
+      (github.event_name == 'workflow_dispatch' &&
+       github.ref_name == github.event.repository.default_branch) ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_repository.full_name == github.repository &&
+       github.event.workflow_run.head_branch == github.event.repository.default_branch)
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    concurrency:
-      group: deploy-pages
-      cancel-in-progress: false
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: Checkout trusted default-branch metadata
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: ${{ github.ref_name }}
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Prepare empty triggering-run snapshot directory
+        if: github.event_name == 'workflow_run'
+        run: |
+          rm -rf "$RUNNER_TEMP/published-output"
+          mkdir -p "$RUNNER_TEMP/published-output"
+          test -z "$(find "$RUNNER_TEMP/published-output" -mindepth 1 -print -quit)"
+
+      - name: Download triggering run snapshot
+        if: github.event_name == 'workflow_run'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: published-output
+          path: ${{ runner.temp }}/published-output
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+
+      - name: Materialize exact Pages input
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          rm -rf pages-input
+          mkdir pages-input
+          if [ "$EVENT_NAME" = "workflow_run" ]; then
+            source_dir="$RUNNER_TEMP/published-output"
+            for artifact in \
+              clash.yaml \
+              singbox.json \
+              v2ray-base64.txt \
+              feed.xml \
+              pipeline-status.json \
+              _headers \
+              pages-commit-sha.txt; do
+              test -f "${source_dir}/${artifact}"
+            done
+            test "$(find "$source_dir" -mindepth 1 -maxdepth 1 | wc -l)" -eq 7
+            test "$(find "$source_dir" -mindepth 1 -maxdepth 1 -type f | wc -l)" -eq 7
+          else
+            source_dir=output
+          fi
+          for artifact in \
+            clash.yaml \
+            singbox.json \
+            v2ray-base64.txt \
+            feed.xml \
+            pipeline-status.json \
+            _headers; do
+            test -f "${source_dir}/${artifact}"
+            cp "${source_dir}/${artifact}" "pages-input/${artifact}"
+          done
+          if [ "$EVENT_NAME" = "workflow_run" ]; then
+            cp "${source_dir}/pages-commit-sha.txt" pages-input/pages-commit-sha.txt
+            expected=7
+          else
+            expected=6
+          fi
+          test "$(find pages-input -mindepth 1 -maxdepth 1 -type f | wc -l)" -eq "$expected"
+          test "$(find pages-input -mindepth 1 -maxdepth 1 | wc -l)" -eq "$expected"
+
+      - name: Verify Pages input
+        run: |
+          test -s pages-input/clash.yaml
+          test -s pages-input/singbox.json
+          test -s pages-input/v2ray-base64.txt
+          test -s pages-input/feed.xml
+          test -s pages-input/pipeline-status.json
+          test -s pages-input/_headers
+          python -m pip install --disable-pip-version-check --no-input PyYAML==6.0.3
+          python - <<'PY'
+          import base64, datetime, json, pathlib, xml.etree.ElementTree as ET
+          import yaml
+          root = pathlib.Path('pages-input')
+          clash = yaml.safe_load((root / 'clash.yaml').read_text(encoding='utf-8'))
+          singbox = json.loads((root / 'singbox.json').read_text(encoding='utf-8'))
+          decoded = base64.b64decode(
+              (root / 'v2ray-base64.txt').read_text().strip(), validate=True
+          ).decode('utf-8')
+          rss = ET.parse(root / 'feed.xml').getroot()
+          status = json.loads((root / 'pipeline-status.json').read_text(encoding='utf-8'))
+          assert set(status) == {
+              'schema_version', 'generated_at', 'pipeline_status', 'verify', 'artifacts'
+          }
+          assert type(status['schema_version']) is int and status['schema_version'] == 1
+          assert (
+              isinstance(status['pipeline_status'], str)
+              and status['pipeline_status'] in {'healthy', 'unknown'}
+          )
+          generated_at = status['generated_at']
+          assert isinstance(generated_at, str) and generated_at.endswith('Z')
+          datetime.datetime.fromisoformat(generated_at[:-1] + '+00:00')
+          verify = status['verify']
+          assert set(verify) == {
+              'total', 'verified', 'alive', 'dead', 'unverified',
+              'tier1_alive', 'tier2_passed', 'completed'
+          }
+          for key in set(verify) - {'completed'}:
+              assert type(verify[key]) is int and verify[key] >= 0
+          assert type(verify['completed']) is bool
+          assert verify['total'] == verify['verified'] + verify['unverified']
+          assert verify['verified'] == verify['alive'] + verify['dead']
+          assert verify['tier1_alive'] <= verify['alive']
+          assert verify['tier2_passed'] <= verify['tier1_alive']
+          if status['pipeline_status'] == 'healthy':
+              assert verify['total'] > 0
+              assert verify['completed'] is True and verify['unverified'] == 0
+              assert verify['tier1_alive'] == verify['alive']
+          else:
+              assert verify['completed'] is False
+          artifacts = status['artifacts']
+          assert set(artifacts) == {
+              'node_count', 'clash_proxies', 'singbox_outbounds', 'rss_items'
+          }
+          assert all(type(value) is int and value >= 0 for value in artifacts.values())
+          assert artifacts['node_count'] == len(
+              [line for line in decoded.splitlines() if line.strip()]
+          )
+          assert artifacts['singbox_outbounds'] == len(singbox['outbounds'])
+          assert artifacts['rss_items'] == len(rss.findall('./channel/item'))
+          assert isinstance(clash, dict) and isinstance(clash.get('proxies'), list)
+          assert artifacts['clash_proxies'] == len(clash['proxies'])
+          assert artifacts['clash_proxies'] == artifacts['node_count']
+          assert artifacts['rss_items'] == artifacts['node_count']
+          assert artifacts['singbox_outbounds'] <= artifacts['node_count']
+          if status['pipeline_status'] == 'healthy':
+              assert artifacts['node_count'] == verify['alive']
+          PY
+
+      - name: Resolve deployed commit
+        id: metadata
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_run" ]; then
+            test -s pages-input/pages-commit-sha.txt
+            commit_hash=$(cat pages-input/pages-commit-sha.txt)
+          else
+            commit_hash=$(git rev-parse --verify HEAD)
+          fi
+          rm -f pages-input/pages-commit-sha.txt
+          test "${#commit_hash}" -eq 40
+          case "$commit_hash" in
+            ''|*[!0-9a-f]*) exit 1 ;;
+          esac
+          if [ "$EVENT_NAME" = "workflow_run" ]; then
+            git cat-file -e "${commit_hash}^{commit}"
+            git merge-base --is-ancestor "$commit_hash" HEAD
+            for artifact in \
+              output/clash.yaml \
+              output/singbox.json \
+              output/v2ray-base64.txt \
+              output/feed.xml \
+              output/pipeline-status.json \
+              output/_headers; do
+              git show "${commit_hash}:${artifact}" | cmp - "pages-input/${artifact#output/}"
+            done
+          fi
+          echo "commit_hash=$commit_hash" >> "$GITHUB_OUTPUT"
+
+      - name: Stage exact Pages directory
+        run: |
+          mv pages-input pages-dist
+          test "$(find pages-dist -maxdepth 1 -type f | wc -l)" -eq 6
+          test "$(find pages-dist -mindepth 1 -maxdepth 1 | wc -l)" -eq 6
 
       - name: Deploy to Cloudflare Pages
-        uses: cloudflare/pages-action@v1
+        uses: cloudflare/wrangler-action@da0e0dfe58b7a431659754fdf3f186c529afbe65 # v3.14.1
         with:
           apiToken: ${{ secrets.CF_API_TOKEN }}
           accountId: ${{ secrets.CF_ACCOUNT_ID }}
-          projectName: ${{ secrets.CF_PROJECT_NAME }}
-          directory: output
+          wranglerVersion: '4.111.0'
+          command: >-
+            pages deploy pages-dist
+            --project-name=${{ secrets.CF_PROJECT_NAME }}
+            --branch=${{ github.event.repository.default_branch }}
+            --commit-hash=${{ steps.metadata.outputs.commit_hash }}

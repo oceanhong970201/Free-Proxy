@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Proxy Operations Console</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">跳至主要內容</a>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand"><div><strong>PROXY OPS</strong><span>本機營運控制台</span></div></div>
+      <div class="topbar-actions"><span id="connection-state" class="connection"><i></i>連線中</span><button id="refresh-button" class="button button-quiet" type="button">重新整理</button></div>
+    </header>
+    <nav class="tabs" aria-label="主要導覽" role="tablist">
+      <button class="tab is-active" type="button" role="tab" data-tab="overview" aria-controls="overview" aria-selected="true">總覽</button>
+      <button class="tab" type="button" role="tab" data-tab="nodes" aria-controls="nodes" aria-selected="false">節點 <span id="tab-node-count"></span></button>
+      <button class="tab" type="button" role="tab" data-tab="sources" aria-controls="sources" aria-selected="false">來源</button>
+      <button class="tab" type="button" role="tab" data-tab="outputs" aria-controls="outputs" aria-selected="false">輸出</button>
+    </nav>
+    <main id="main">
+      <section id="overview" class="panel-view is-active" aria-labelledby="overview-title">
+        <div class="section-heading"><div><p class="eyebrow">SYSTEM STATUS</p><h1 id="overview-title">作業總覽</h1><p id="generated-at" class="muted">正在取得最新狀態…</p></div><span id="serving-summary-status" class="status-pill status-unknown" aria-live="polite">對外服務：未知</span></div>
+        <div class="operational-state-grid" aria-label="遠端與本機驗證狀態">
+          <article class="card state-card state-card-remote" aria-labelledby="remote-pipeline-title">
+            <div class="card-header"><div><p class="eyebrow">REMOTE AUTOMATION</p><h2 id="remote-pipeline-title">遠端自動化</h2></div><span id="pipeline-status" class="status-pill status-unknown" aria-live="polite">未知</span></div>
+            <p id="remote-generated-at" class="state-timestamp">產生時間：—</p>
+            <dl id="remote-verification-metrics" class="verification-metrics" aria-label="遠端驗證節點統計"></dl>
+            <dl id="remote-pipeline-details" class="state-detail-list"></dl>
+            <p id="remote-pipeline-note" class="state-note" role="status" aria-live="polite"></p>
+          </article>
+          <article class="card state-card state-card-local" aria-labelledby="local-verification-title">
+            <div class="card-header"><div><p class="eyebrow">LOCAL VERIFICATION</p><h2 id="local-verification-title">本機節點驗證</h2></div><span id="local-verification-status" class="status-pill status-unknown" aria-live="polite">未知</span></div>
+            <p id="local-updated-at" class="state-timestamp">更新時間：—</p>
+            <p class="state-description">呈現本機候選池的存活驗證進度；出口 IP 與純淨度是按需檢查，不會改變對外服務狀態。</p>
+            <dl id="local-verification-metrics" class="verification-metrics" aria-label="本機驗證節點統計"></dl>
+            <p id="local-verification-note" class="state-note" role="status" aria-live="polite"></p>
+          </article>
+        </div>
+        <div id="metric-grid" class="metric-grid" aria-label="其他營運指標" aria-live="polite"></div>
+        <div class="two-column supporting-grid">
+          <article class="card"><div class="card-header"><div><p class="eyebrow">PRODUCTION</p><h2>對外服務</h2></div><span id="serving-status" class="status-pill status-unknown">未知</span></div><dl id="serving-details" class="detail-list"></dl></article>
+          <article class="card"><div class="card-header"><div><p class="eyebrow">LOCAL PIPELINE</p><h2>本機資料管線</h2></div><span id="last-command" class="code-label">—</span></div><ol id="pipeline-list" class="stage-list"></ol></article>
+        </div>
+      </section>
+      <section id="nodes" class="panel-view" aria-labelledby="nodes-title" hidden>
+        <div class="section-heading"><div><p class="eyebrow">NODE INVENTORY</p><h1 id="nodes-title">節點清單</h1><p id="nodes-summary" class="muted">載入節點資料中…</p></div><div class="check-actions"><span id="selection-count" class="selection-count">已選 0 / 20</span><button id="endpoint-check" class="button" type="button" disabled>端點檢查</button><button id="exit-check" class="button button-secondary" type="button" disabled>出口 IP 檢查</button><button id="purity-check" class="button button-purity" type="button" aria-describedby="purity-help" disabled>純淨度檢查</button></div></div>
+        <p id="purity-help" class="checker-help">純淨度依出口 IP 的信譽訊號評分，與端點連通及出口 IP 驗證分開顯示。</p>
+        <form id="node-filters" class="filters" autocomplete="off">
+          <label>搜尋<input id="filter-query" name="query" type="search" placeholder="名稱、位址、來源或協定"></label>
+          <label>狀態<select id="filter-status" name="status"><option value="all">全部狀態</option><option value="alive">存活</option><option value="unverified">未驗證</option><option value="dead">失敗</option></select></label>
+          <label>協定<select id="filter-proto" name="proto"><option value="all">全部協定</option></select></label>
+          <label>來源<select id="filter-source" name="source"><option value="all">全部來源</option></select></label>
+          <label>發佈<select id="filter-published" name="published"><option value="all">全部</option><option value="yes">已發佈</option><option value="no">未發佈</option></select></label>
+          <button class="button button-quiet" type="reset">清除篩選</button>
+        </form>
+        <div id="job-panel" class="job-panel" hidden role="region" aria-labelledby="job-title"></div>
+        <div class="table-wrap"><table class="node-table"><thead><tr><th scope="col"><input id="select-page" type="checkbox" aria-label="選取本頁節點"></th><th scope="col">節點</th><th scope="col">協定</th><th scope="col">端點</th><th scope="col">狀態</th><th scope="col">延遲</th><th scope="col">連通／出口</th><th scope="col">最近純淨度</th><th scope="col">來源</th></tr></thead><tbody id="nodes-body"></tbody></table></div>
+        <div class="pagination"><span id="pagination-info" class="muted"></span><div><button id="previous-page" class="button button-quiet" type="button">上一頁</button><button id="next-page" class="button button-quiet" type="button">下一頁</button></div></div>
+      </section>
+      <section id="sources" class="panel-view" aria-labelledby="sources-title" hidden><div class="section-heading"><div><p class="eyebrow">INGESTION</p><h1 id="sources-title">來源健康度</h1><p id="sources-summary" class="muted">—</p></div></div><div class="table-wrap"><table><thead><tr><th>來源</th><th>網域</th><th>狀態</th><th>層級</th><th>格式</th><th>上次擷取</th><th>數量</th><th>鏡像</th></tr></thead><tbody id="sources-body"></tbody></table></div></section>
+      <section id="outputs" class="panel-view" aria-labelledby="outputs-title" hidden><div class="section-heading"><div><p class="eyebrow">ARTIFACTS</p><h1 id="outputs-title">輸出產物</h1><p class="muted">產物完整性與最新版本資訊。</p></div></div><div id="artifacts-grid" class="artifact-grid"></div><article class="card git-card"><p class="eyebrow">REPOSITORY</p><dl id="git-details" class="detail-list"></dl></article></section>
+    </main>
+    <footer>LOCAL OPERATIONS • <span id="refresh-interval">—</span></footer>
+  </div>
+  <script src="/app.js" defer></script>
+</body>
+</html>

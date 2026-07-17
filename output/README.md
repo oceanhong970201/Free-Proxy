@@ -1,52 +1,132 @@
-# 訂閱檔（CI 自動產物）
+# 訂閱輸出（自動產物）
 
-本目錄下的三個檔案由 GitHub Actions 權威管線（`.github/workflows/fetch.yml`）每 30 分鐘自動重新產生，**不要手動編輯**。
+`output/` 由 aggregator 產生並可由 CI 提交。請勿直接編輯產物；若格式有誤，修正 parser/emitter、重新驗證，再重建完整 snapshot。
 
-| 檔案 | 格式 | 用戶端 |
+## 檔案
+
+| 檔案 | 格式 | 典型讀取端 |
 |---|---|---|
-| `clash.yaml` | Clash / mihomo | Clash for Windows / Android, mihomo, FlClash |
-| `singbox.json` | sing-box | sing-box, SFA, Koru |
-| `v2ray-base64.txt` | v2ray base64 訂閱 | v2rayN / v2rayNG, Qv2ray |
+| `clash.yaml` | Clash/Mihomo YAML | Mihomo 相容客戶端 |
+| `singbox.json` | sing-box JSON | sing-box 相容客戶端 |
+| `v2ray-base64.txt` | 換行 URI 經 UTF-8 base64 | 支援 V2Ray subscription 的客戶端 |
+| `feed.xml` | RSS 2.0 | RSS reader／更新監控 |
+| `pipeline-status.json` | Sanitized schema v1 JSON | 遠端 Dashboard／狀態監控 |
+| `_headers` | 靜態託管 response headers | Pages 類靜態託管 |
 
-## 更新頻率
+不同客戶端 schema 並不保證支援完全相同的協議與 transport。對目標 client 明確不支援的協議，emitter 只能使用有測試的顯式 skip，並在 summary 回報原因與數量；這也是 `singbox.json` 節點數可能少於其他格式的原因。損壞的 live 記錄、必要欄位缺失、未知 transport 或其他非預期轉換錯誤會使正常 emit 失敗並保留上一份五檔 snapshot，不會靜默降級成 TCP 或發布半寫檔案。
 
-- 排程：`*/30 * * * *`（每 30 分鐘整點 + 30 分一次）
-- 管線：`fetch → parse → dedup → verify → emit → commit → CF Pages 部署 → jsDelivr purge`
-- 逾時保護：每 job 上限 30 分鐘（遠低於 GitHub Actions 6 小時上限）
-- 併發控制：`concurrency.group: aggregate`，新 run 不取消進行中的 run（`cancel-in-progress: false`），避免產物半寫。
+## 產生條件
 
-## 訂閱 URL
+正常發布流程為：
 
-假設倉庫為 `https://github.com/<owner>/<repo>`，預設分支 `main`。把下面的 `<owner>/<repo>` 換成實際值。
-
-### 1. GitHub Raw（權威源，最即時，可能有 rate limit）
-
-```
-https://raw.githubusercontent.com/<owner>/<repo>/main/output/clash.yaml
-https://raw.githubusercontent.com/<owner>/<repo>/main/output/singbox.json
-https://raw.githubusercontent.com/<owner>/<repo>/main/output/v2ray-base64.txt
+```text
+fetch -> parse -> verify -> emit -> publish --strict
 ```
 
-### 2. jsDelivr CDN（全球快取，CI commit 後主動 purge）
+- `emit` 只使用 `alive is True` 的完整代理設定。
+- `publish --strict` 再要求達到 `config/quality.yaml` 的下載速度門檻。
+- 合格節點為空時保留既有輸出與 Worker snapshot。
+- 檔案先寫至暫存檔，再以 replace 更新，避免單檔半寫。
+- GitHub Actions schedule 是 best-effort；cron 設定不保證準點或一定執行。以 workflow run 結果與產物 commit 時間判定新鮮度。
 
-```
-https://cdn.jsdelivr.net/gh/<owner>/<repo>@main/output/clash.yaml
-https://cdn.jsdelivr.net/gh/<owner>/<repo>@main/output/singbox.json
-https://cdn.jsdelivr.net/gh/<owner>/<repo>@main/output/v2ray-base64.txt
-```
+## 重建
 
-> 單檔 < 20 MiB（jsDelivr 上限）。CI 每次 commit 後對這三個檔執行 `curl -X PURGE`，確保快取立即反映新內容。
+只有在 `state/live.jsonl` 已由本輪完整 verify 更新後才執行：
 
-### 3. Cloudflare Pages（`*.pages.dev`，CF 邊緣快取）
-
-```
-https://<project>.pages.dev/clash.yaml
-https://<project>.pages.dev/singbox.json
-https://<project>.pages.dev/v2ray-base64.txt
+```powershell
+python src\aggregator\cli.py emit
 ```
 
-> 專案名由 secret `CF_PROJECT_NAME` 指定。部署由 `.github/workflows/deploy-pages.yml`（在 `fetch-and-publish` 完成後觸發）或 `fetch.yml` 內建步驟執行。
+不要用舊的、未驗證的或手工修改過的 `state/live.jsonl` 覆蓋 tracked output。
 
-## 健康檢查
+## 離線完整性檢查
 
-`.github/workflows/health-check.yml` 每 6 小時打 Worker 的 `/health` 端點，失敗時自動開 issue（標籤 `health-check` / `ops`）。
+以下檢查格式可解析、base64 可解碼及檔案非空；客戶端語意驗證仍需使用對應程式：
+
+```powershell
+@'
+from pathlib import Path
+import base64, json
+import xml.etree.ElementTree as ET
+import yaml
+
+root = Path("output")
+clash = yaml.safe_load((root / "clash.yaml").read_text(encoding="utf-8"))
+singbox = json.loads((root / "singbox.json").read_text(encoding="utf-8"))
+decoded = base64.b64decode(
+    (root / "v2ray-base64.txt").read_text(encoding="utf-8"),
+    validate=True,
+).decode("utf-8")
+ET.parse(root / "feed.xml")
+
+assert isinstance(clash, dict) and isinstance(clash.get("proxies"), list)
+assert isinstance(singbox, dict) and isinstance(singbox.get("outbounds"), list)
+uris = [line for line in decoded.splitlines() if line.strip()]
+assert uris
+print({"clash": len(clash["proxies"]), "singbox": len(singbox["outbounds"]), "uris": len(uris)})
+'@ | python -
+```
+
+若本機已安裝對應 client，再執行：
+
+```powershell
+sing-box check -c output\singbox.json
+# 依本機 Mihomo/Clash binary 的參數檢查 output\clash.yaml
+```
+
+## 發布 URL 範本
+
+下列只是 URL 形式，不代表對應服務目前已部署或最新一次 workflow 成功。
+
+### GitHub Raw
+
+```text
+https://raw.githubusercontent.com/OWNER/REPO/BRANCH/output/clash.yaml
+https://raw.githubusercontent.com/OWNER/REPO/BRANCH/output/singbox.json
+https://raw.githubusercontent.com/OWNER/REPO/BRANCH/output/v2ray-base64.txt
+https://raw.githubusercontent.com/OWNER/REPO/BRANCH/output/feed.xml
+```
+
+### jsDelivr
+
+```text
+https://cdn.jsdelivr.net/gh/OWNER/REPO@BRANCH/output/clash.yaml
+https://cdn.jsdelivr.net/gh/OWNER/REPO@BRANCH/output/singbox.json
+https://cdn.jsdelivr.net/gh/OWNER/REPO@BRANCH/output/v2ray-base64.txt
+https://cdn.jsdelivr.net/gh/OWNER/REPO@BRANCH/output/feed.xml
+```
+
+CDN 可能有大小、快取與 purge 限制；workflow 中的 purge 成功也不能取代內容驗證。
+
+### Cloudflare Pages 或其他靜態站
+
+```text
+https://YOUR_STATIC_SITE/clash.yaml
+https://YOUR_STATIC_SITE/singbox.json
+https://YOUR_STATIC_SITE/v2ray-base64.txt
+https://YOUR_STATIC_SITE/feed.xml
+```
+
+只有在 deployment workflow 成功且對應 commit 已上線後，才把此 URL 對外標為可用。
+
+## Worker 訂閱與靜態檔的差異
+
+Worker `/sub` 與 `/sub?format=clash` 讀取 D1 中目前完整 snapshot；靜態 URL 讀取 repository／Pages 上一次成功提交的 `output/`。兩者可能因部署順序而短暫不同，維護時應比對：
+
+- 最近 strict publish 的 `snapshot_id` 與節點數；
+- output commit SHA；
+- Worker `/health` 的 `ok`、snapshot counts 與 age；
+- Pages/CDN 實際回傳內容的 hash。
+
+RSS channel link 使用 `PUBLIC_BASE_URL`；若未設定，應在發布前確認預設值是否適合目標環境。
+
+## Public pipeline status
+
+`pipeline-status.json` is a sanitized, fixed-schema snapshot for operational
+dashboards. Schema version 1 contains only `generated_at`, `pipeline_status`,
+verification counts, and emitted artifact counts. It never contains proxy URIs,
+credentials, tokens, provider responses, or verification error details.
+
+The tracked bootstrap state may be `unknown` with `verify.completed: false`.
+Only a successful `verify -> emit` run can atomically replace it with `healthy`;
+a failed run retains the previous public status and subscription snapshot.
