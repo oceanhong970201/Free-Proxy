@@ -197,6 +197,11 @@ jobs:
           test "$(find pages-dist -maxdepth 1 -type f | wc -l)" -eq 6
           test "$(find pages-dist -mindepth 1 -maxdepth 1 | wc -l)" -eq 6
 
+      - name: Validate Pages production branch
+        env:
+          PAGES_PRODUCTION_BRANCH: ${{ vars.PAGES_PRODUCTION_BRANCH }}
+        run: test -n "$PAGES_PRODUCTION_BRANCH"
+
       - name: Deploy to Cloudflare Pages
         uses: cloudflare/wrangler-action@da0e0dfe58b7a431659754fdf3f186c529afbe65 # v3.14.1
         with:
@@ -206,5 +211,5 @@ jobs:
           command: >-
             pages deploy pages-dist
             --project-name=${{ secrets.CF_PROJECT_NAME }}
-            --branch=${{ github.event.repository.default_branch }}
+            --branch=${{ vars.PAGES_PRODUCTION_BRANCH }}
             --commit-hash=${{ steps.metadata.outputs.commit_hash }}

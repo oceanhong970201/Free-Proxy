@@ -335,6 +335,8 @@ def test_workflows_validate_commit_upload_and_deploy_pipeline_status() -> None:
     assert "verify['total'] > 0" in deploy
     assert 'cmp - "pages-input/${artifact#output/}"' in deploy
     assert '" -eq 6' in deploy
+    assert 'run: test -n "$PAGES_PRODUCTION_BRANCH"' in deploy
+    assert "--branch=${{ vars.PAGES_PRODUCTION_BRANCH }}" in deploy
 
 
 def test_tracked_pipeline_status_matches_current_output_snapshot() -> None:
