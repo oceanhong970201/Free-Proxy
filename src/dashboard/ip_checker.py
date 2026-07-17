@@ -333,7 +333,9 @@ def _normalize_reputation(
     }
 
 
-def _same_ip(value: str, expected: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+def _same_ip(
+    value: str, expected: ipaddress.IPv4Address | ipaddress.IPv6Address
+) -> bool:
     try:
         return ipaddress.ip_address(value) == expected
     except ValueError:
@@ -436,7 +438,9 @@ def _stop_process(process: subprocess.Popen[str]) -> None:
             pass
 
 
-def _mihomo_config(node: ProxyNode, server_ip: str, port: int, token: str) -> dict[str, Any]:
+def _mihomo_config(
+    node: ProxyNode, server_ip: str, port: int, token: str
+) -> dict[str, Any]:
     proxy = to_clash_dict(node)
     proxy["name"] = "PROBE_NODE"
     proxy["server"] = server_ip
@@ -479,9 +483,7 @@ class NodeIpChecker:
         self.node_loader = node_loader
         self.timeout_seconds = timeout_seconds
         self.cache_seconds = cache_seconds
-        self.purity_timeout_seconds = max(
-            1.0, min(30.0, float(purity_timeout_seconds))
-        )
+        self.purity_timeout_seconds = max(1.0, min(30.0, float(purity_timeout_seconds)))
         self.purity_cache_seconds = max(
             0, min(7 * 24 * 60 * 60, int(purity_cache_seconds))
         )
@@ -492,9 +494,7 @@ class NodeIpChecker:
         self._cache_lock = threading.Lock()
         self._direct_ip: tuple[float, str | None] = (0.0, None)
         self._direct_lock = threading.Lock()
-        self._reputation_cache: dict[
-            tuple[str, str], tuple[float, dict[str, Any]]
-        ] = {}
+        self._reputation_cache: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
         self._reputation_cache_lock = threading.Lock()
         self._reputation_slots = threading.BoundedSemaphore(provider_concurrency)
         self._provider_usage: dict[str, tuple[str, int]] = {}
@@ -728,9 +728,7 @@ class NodeIpChecker:
                 _stop_process(process)
         valid = [item for item in provider_results if item.get("ip")]
         if not valid:
-            return self._failure(
-                node_id, result_mode, "all_ip_probes_failed", started
-            )
+            return self._failure(node_id, result_mode, "all_ip_probes_failed", started)
         exit_ips = sorted({str(item["ip"]) for item in valid})
         direct_ip = self._direct_public_ip()
         direct_match = bool(direct_ip and direct_ip in exit_ips)
@@ -825,9 +823,7 @@ class NodeIpChecker:
             if result.get("status") == "ok":
                 self._store_reputation(exit_ip, provider, result)
 
-        successful = [
-            item for item in provider_results if item.get("status") == "ok"
-        ]
+        successful = [item for item in provider_results if item.get("status") == "ok"]
         confidence = _purity_confidence(successful)
         coverage = {
             "ok": len(successful),
@@ -869,8 +865,10 @@ class NodeIpChecker:
             status = base_status
         else:
             status = "passed"
-        if score < 40 and "elevated_risk" not in reasons and not any(
-            item in _REPUTATION_SIGNALS for item in reasons
+        if (
+            score < 40
+            and "elevated_risk" not in reasons
+            and not any(item in _REPUTATION_SIGNALS for item in reasons)
         ):
             reasons.append("elevated_risk")
         return {
@@ -887,9 +885,7 @@ class NodeIpChecker:
             "cached": False,
         }
 
-    def _cached_reputation(
-        self, exit_ip: str, provider: str
-    ) -> dict[str, Any] | None:
+    def _cached_reputation(self, exit_ip: str, provider: str) -> dict[str, Any] | None:
         if self.purity_cache_seconds <= 0:
             return None
         with self._reputation_cache_lock:
@@ -1090,7 +1086,10 @@ class NodeIpChecker:
         while process.poll() is None:
             if cancel_event.is_set() or time.monotonic() >= deadline:
                 _stop_process(process)
-                return {"ok": False, "error": "cancelled" if cancel_event.is_set() else "timeout"}
+                return {
+                    "ok": False,
+                    "error": "cancelled" if cancel_event.is_set() else "timeout",
+                }
             time.sleep(0.08)
         try:
             stdout, _stderr = process.communicate(timeout=2)
@@ -1216,7 +1215,11 @@ class IpCheckJobManager:
     def _finish_if_complete(self, job: dict[str, Any]) -> None:
         states = [item["status"] for item in job["items"].values()]
         if all(state in _TERMINAL_STATES for state in states):
-            job["status"] = "cancelled" if all(state == "cancelled" for state in states) else "completed"
+            job["status"] = (
+                "cancelled"
+                if all(state == "cancelled" for state in states)
+                else "completed"
+            )
             job["completed_at"] = int(time.time())
 
     def cancel(self, job_id: str) -> dict[str, Any] | None:
@@ -1249,7 +1252,9 @@ class IpCheckJobManager:
                 "completed_at": job["completed_at"],
                 "total": len(items),
                 "completed": sum(
-                    count for state, count in counts.items() if state in _TERMINAL_STATES
+                    count
+                    for state, count in counts.items()
+                    if state in _TERMINAL_STATES
                 ),
                 "counts": dict(counts),
                 "items": items,

@@ -41,7 +41,9 @@ def _verify_summary(live_file: Path, *, alive: int, unverified: int = 0) -> dict
     }
 
 
-def _configure_emitter(monkeypatch, tmp_path: Path, nodes: list[ProxyNode]) -> tuple[Path, Path]:
+def _configure_emitter(
+    monkeypatch, tmp_path: Path, nodes: list[ProxyNode]
+) -> tuple[Path, Path]:
     live = tmp_path / "state" / "live.jsonl"
     live.parent.mkdir()
     live.write_text(
@@ -193,9 +195,7 @@ def test_emit_activates_healthy_status_with_exact_artifact_counts(
     status_text = (output / "pipeline-status.json").read_text(encoding="utf-8")
     assert secret not in status_text
     assert "vless://" not in status_text
-    validated = emit.validate_pipeline_status_artifact(
-        output, require_healthy=True
-    )
+    validated = emit.validate_pipeline_status_artifact(output, require_healthy=True)
     assert validated["node_count"] == 1
 
 
@@ -277,7 +277,9 @@ def test_status_activation_failure_rolls_back_all_five_files(
     assert {path: path.read_bytes() for path in old} == old
 
 
-def test_cli_completed_verify_loader_is_immediate_and_closed(monkeypatch, tmp_path: Path) -> None:
+def test_cli_completed_verify_loader_is_immediate_and_closed(
+    monkeypatch, tmp_path: Path
+) -> None:
     last_run = tmp_path / "last-run.json"
     monkeypatch.setattr(cli, "LAST_RUN", last_run)
     summary = {"success": True, "completed": True, "tier1_alive": 1}
@@ -340,9 +342,7 @@ def test_tracked_pipeline_status_matches_current_output_snapshot() -> None:
     output = root / "output"
 
     summary = emit.validate_pipeline_status_artifact(output)
-    document = json.loads(
-        (output / "pipeline-status.json").read_text(encoding="utf-8")
-    )
+    document = json.loads((output / "pipeline-status.json").read_text(encoding="utf-8"))
 
     assert summary["success"] is True
     assert set(document) == {

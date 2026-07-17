@@ -77,9 +77,7 @@ def _clamped_int(
 
 
 _PIPELINE_STATUS_HOST = "raw.githubusercontent.com"
-_PIPELINE_STATUS_PATH = (
-    "/oceanhong970201/Free-Proxy/master/output/pipeline-status.json"
-)
+_PIPELINE_STATUS_PATH = "/oceanhong970201/Free-Proxy/master/output/pipeline-status.json"
 
 
 def _safe_pipeline_status_url(value: object) -> str:
@@ -154,9 +152,7 @@ def load_dashboard_config(root: Path) -> DashboardConfig:
             60,
             7 * 24 * 60 * 60,
         ),
-        checker_timeout_seconds=max(
-            5.0, float(checker.get("timeout_seconds", 18.0))
-        ),
+        checker_timeout_seconds=max(5.0, float(checker.get("timeout_seconds", 18.0))),
         checker_concurrency=max(1, min(4, int(checker.get("concurrency", 4)))),
         checker_cache_seconds=max(0, int(checker.get("cache_seconds", 300))),
         purity_timeout_seconds=_clamped_float(
@@ -188,15 +184,29 @@ _NODE_ID_RE = re.compile(r"^[0-9a-f]{64}$")
 _IP_RESULT_STATES = {"passed", "partial", "rotating", "bypass", "failed", "cancelled"}
 _IP_RESULT_MODES = {"endpoint", "exit", "purity"}
 _IP_RESULT_ERRORS = {
-    "node_not_found", "unsupported_mode", "checker_runtime_unavailable",
-    "invalid_proxy_config", "proxy_core_exited", "proxy_core_timeout",
-    "all_ip_probes_failed", "invalid_response", "cancelled", "timeout",
-    "invalid_probe_url", "curl_cleanup_failed", "check_failed",
-    "all_reputation_probes_failed", "provider_timeout",
-    "provider_http_error", "provider_invalid_response",
-    "provider_response_too_large", "provider_unavailable",
-    "provider_quota_exhausted", "network_error",
-    "unsupported_outbound", "proxy_runtime_error",
+    "node_not_found",
+    "unsupported_mode",
+    "checker_runtime_unavailable",
+    "invalid_proxy_config",
+    "proxy_core_exited",
+    "proxy_core_timeout",
+    "all_ip_probes_failed",
+    "invalid_response",
+    "cancelled",
+    "timeout",
+    "invalid_probe_url",
+    "curl_cleanup_failed",
+    "check_failed",
+    "all_reputation_probes_failed",
+    "provider_timeout",
+    "provider_http_error",
+    "provider_invalid_response",
+    "provider_response_too_large",
+    "provider_unavailable",
+    "provider_quota_exhausted",
+    "network_error",
+    "unsupported_outbound",
+    "proxy_runtime_error",
 }
 _IP_RESULT_PROVIDERS = {"edge-trace", "ip-json"}
 _REPUTATION_PROVIDERS = {"network-risk", "network-profile", "proxy-risk"}
@@ -204,12 +214,23 @@ _REPUTATION_PROVIDER_STATES = {"ok", "error"}
 _PURITY_GRADES = {"A", "B", "C", "D", "F"}
 _PURITY_CONFIDENCE = {"high", "medium", "low"}
 _PURITY_SIGNALS = {
-    "tor", "known_proxy", "vpn", "relay", "datacenter", "hosting",
-    "abuse", "bot", "spam",
+    "tor",
+    "known_proxy",
+    "vpn",
+    "relay",
+    "datacenter",
+    "hosting",
+    "abuse",
+    "bot",
+    "spam",
 }
 _PURITY_REASONS = _PURITY_SIGNALS | {
-    "direct_bypass", "rotating_exit", "provider_disagreement",
-    "limited_provider_coverage", "elevated_risk", "moderate_risk",
+    "direct_bypass",
+    "rotating_exit",
+    "provider_disagreement",
+    "limited_provider_coverage",
+    "elevated_risk",
+    "moderate_risk",
 }
 
 
@@ -270,10 +291,25 @@ def _public_worker_url(value: str) -> str | None:
 def _pipeline_summary(value: dict[str, Any]) -> dict[str, Any]:
     """Expose metrics only; stage errors and arbitrary strings remain server-side."""
     safe_keys = {
-        "success", "strict", "fetched", "parsed", "raw_nodes", "unique",
-        "duplicates", "verified", "alive", "dead", "tier1_alive",
-        "tier2_passed", "published", "emitted", "nodes", "sources",
-        "http_status", "paused", "resumed",
+        "success",
+        "strict",
+        "fetched",
+        "parsed",
+        "raw_nodes",
+        "unique",
+        "duplicates",
+        "verified",
+        "alive",
+        "dead",
+        "tier1_alive",
+        "tier2_passed",
+        "published",
+        "emitted",
+        "nodes",
+        "sources",
+        "http_status",
+        "paused",
+        "resumed",
     }
     result: dict[str, Any] = {}
     for key in safe_keys:
@@ -355,9 +391,8 @@ def _parse_pipeline_status_document(
     if isinstance(schema_version, bool) or schema_version != 1:
         raise ValueError("unsupported pipeline status schema")
     generated_at = document.get("generated_at")
-    if (
-        not isinstance(generated_at, str)
-        or not _PIPELINE_TIMESTAMP_RE.fullmatch(generated_at)
+    if not isinstance(generated_at, str) or not _PIPELINE_TIMESTAMP_RE.fullmatch(
+        generated_at
     ):
         raise ValueError("invalid pipeline status timestamp")
     try:
@@ -379,10 +414,7 @@ def _parse_pipeline_status_document(
     if not isinstance(verify, dict) or set(verify) != _PIPELINE_VERIFY_KEYS:
         raise ValueError("invalid pipeline verify summary")
     completed = verify.get("completed")
-    if (
-        not isinstance(completed, bool)
-        or completed != (pipeline_status == "healthy")
-    ):
+    if not isinstance(completed, bool) or completed != (pipeline_status == "healthy"):
         raise ValueError("pipeline completion state is inconsistent")
     verify_counts = {
         key: _pipeline_count(verify.get(key))
@@ -410,8 +442,7 @@ def _parse_pipeline_status_document(
     if not isinstance(artifacts, dict) or set(artifacts) != _PIPELINE_ARTIFACT_KEYS:
         raise ValueError("invalid pipeline artifact summary")
     artifact_counts = {
-        key: _pipeline_count(artifacts.get(key))
-        for key in _PIPELINE_ARTIFACT_KEYS
+        key: _pipeline_count(artifacts.get(key)) for key in _PIPELINE_ARTIFACT_KEYS
     }
     if (
         artifact_counts["clash_proxies"] != artifact_counts["node_count"]
@@ -475,9 +506,9 @@ class DashboardService:
         self._pipeline_status_cached_at = 0.0
         self._pipeline_status_last_attempt_at = 0.0
         self._pipeline_status_last_error: str | None = None
-        self._pipeline_status_last_good: tuple[
-            dict[str, Any], float, float
-        ] | None = None
+        self._pipeline_status_last_good: tuple[dict[str, Any], float, float] | None = (
+            None
+        )
         self.ip_results_path = self.root / "state" / "ip-check-results.jsonl"
         self._ip_results_lock = threading.RLock()
         self._ip_results_signature: int | None = None
@@ -520,13 +551,26 @@ class DashboardService:
                         rows: list[sqlite3.Row] = []
                     else:
                         wanted = (
-                            "uri", "node_json", "source", "alive", "latency_ms",
-                            "download_speed", "last_checked", "proto", "host", "port",
-                            "country", "id",
+                            "uri",
+                            "node_json",
+                            "source",
+                            "alive",
+                            "latency_ms",
+                            "download_speed",
+                            "last_checked",
+                            "proto",
+                            "host",
+                            "port",
+                            "country",
+                            "id",
                         )
-                        select = ", ".join(_column_expression(columns, name) for name in wanted)
+                        select = ", ".join(
+                            _column_expression(columns, name) for name in wanted
+                        )
                         order = '"id"' if "id" in columns else '"uri"'
-                        rows = conn.execute(f"SELECT {select} FROM nodes ORDER BY {order}").fetchall()
+                        rows = conn.execute(
+                            f"SELECT {select} FROM nodes ORDER BY {order}"
+                        ).fetchall()
                 except sqlite3.Error:
                     # A partially migrated or concurrently replaced database is
                     # represented as an empty dashboard rather than crashing HTTP.
@@ -550,16 +594,16 @@ class DashboardService:
                             "raw": uri,
                             "source": row["source"],
                             "alive": (
-                                bool(row["alive"])
-                                if row["alive"] is not None
-                                else None
+                                bool(row["alive"]) if row["alive"] is not None else None
                             ),
                             "latency_ms": row["latency_ms"],
                             "download_speed": row["download_speed"],
                         }
                     )
                     try:
-                        node = ProxyNode(**data) if data.get("proto") else parse_uri(uri)
+                        node = (
+                            ProxyNode(**data) if data.get("proto") else parse_uri(uri)
+                        )
                     except (TypeError, ValueError):
                         node = None
                     if node is None:
@@ -620,7 +664,9 @@ class DashboardService:
             results: dict[str, dict[str, dict[str, Any]]] = {}
             if self.ip_results_path.exists():
                 try:
-                    lines = self.ip_results_path.read_text(encoding="utf-8").splitlines()
+                    lines = self.ip_results_path.read_text(
+                        encoding="utf-8"
+                    ).splitlines()
                 except OSError:
                     lines = []
                 for line in lines:
@@ -701,9 +747,7 @@ class DashboardService:
                 if value.get(key) is not None:
                     number = float(value[key])
                     if math.isfinite(number):
-                        result[key] = round(
-                            max(0.0, min(number, 300_000.0)), 1
-                        )
+                        result[key] = round(max(0.0, min(number, 300_000.0)), 1)
             except (TypeError, ValueError):
                 pass
         for key in ("exit_ip",):
@@ -737,7 +781,9 @@ class DashboardService:
                     provider_result["ip"] = parsed_ips[0]
                 for key in ("country", "colo"):
                     field = item.get(key)
-                    if isinstance(field, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,16}", field):
+                    if isinstance(field, str) and re.fullmatch(
+                        r"[A-Za-z0-9_-]{1,16}", field
+                    ):
                         provider_result[key] = field
                 if isinstance(item.get("error"), str):
                     provider_result["error"] = error_code(item["error"])
@@ -805,8 +851,7 @@ class DashboardService:
                             dict.fromkeys(
                                 signal
                                 for signal in signals[:16]
-                                if isinstance(signal, str)
-                                and signal in _PURITY_SIGNALS
+                                if isinstance(signal, str) and signal in _PURITY_SIGNALS
                             )
                         )
                     if provider_status == "error" and isinstance(
@@ -844,7 +889,9 @@ class DashboardService:
             return
         if clean["cached"]:
             return
-        encoded = (json.dumps(clean, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
+        encoded = (
+            json.dumps(clean, ensure_ascii=False, separators=(",", ":")) + "\n"
+        ).encode("utf-8")
         with self._ip_results_lock:
             self.ip_results_path.parent.mkdir(parents=True, exist_ok=True)
             descriptor = os.open(
@@ -889,10 +936,14 @@ class DashboardService:
                 continue
             if published == "no" and item["published"]:
                 continue
-            if needle and needle not in " ".join(
-                str(item.get(key) or "")
-                for key in ("name", "host", "source", "proto", "short_id")
-            ).casefold():
+            if (
+                needle
+                and needle
+                not in " ".join(
+                    str(item.get(key) or "")
+                    for key in ("name", "host", "source", "proto", "short_id")
+                ).casefold()
+            ):
                 continue
             enriched = dict(item)
             checks = self._ip_results.get(item["id"], {})
@@ -977,13 +1028,19 @@ class DashboardService:
             try:
                 if kind == "clash":
                     document = yaml.safe_load(path.read_text(encoding="utf-8"))
-                    proxies = document.get("proxies") if isinstance(document, dict) else None
+                    proxies = (
+                        document.get("proxies") if isinstance(document, dict) else None
+                    )
                     if not isinstance(proxies, list):
                         raise ValueError("missing proxies list")
                     count = len(proxies)
                 elif kind == "sing-box":
                     document = json.loads(path.read_text(encoding="utf-8"))
-                    outbounds = document.get("outbounds") if isinstance(document, dict) else None
+                    outbounds = (
+                        document.get("outbounds")
+                        if isinstance(document, dict)
+                        else None
+                    )
                     if not isinstance(outbounds, list):
                         raise ValueError("missing outbounds list")
                     count = len(outbounds)
@@ -1047,9 +1104,7 @@ class DashboardService:
                     for chunk in response.iter_bytes():
                         body.extend(chunk)
                         if len(body) > _MAX_PIPELINE_STATUS_BYTES:
-                            raise _PipelineStatusFetchError(
-                                "response_too_large"
-                            )
+                            raise _PipelineStatusFetchError("response_too_large")
         except _PipelineStatusFetchError:
             raise
         except httpx.HTTPError as exc:
@@ -1216,7 +1271,9 @@ class DashboardService:
                     result["subscription_bytes"] = len(body)
                     result["subscription_sha256"] = hashlib.sha256(body).hexdigest()
                     document = yaml.safe_load(body.decode("utf-8"))
-                    proxies = document.get("proxies") if isinstance(document, dict) else None
+                    proxies = (
+                        document.get("proxies") if isinstance(document, dict) else None
+                    )
                     if not isinstance(proxies, list):
                         raise ValueError("Worker subscription is missing proxies")
                     result["subscription_nodes"] = len(proxies)
@@ -1227,7 +1284,11 @@ class DashboardService:
                 health_ok = bool((result.get("health") or {}).get("ok"))
                 serving = result.get("subscription_valid") is True
                 result["status"] = (
-                    "healthy" if health_ok and serving else "degraded" if serving else "offline"
+                    "healthy"
+                    if health_ok and serving
+                    else "degraded"
+                    if serving
+                    else "offline"
                 )
             self._remote_cache = result
             self._remote_cached_at = now
@@ -1290,11 +1351,7 @@ class DashboardService:
         updated_at = max(updated_candidates, default=None)
         return {
             "status": (
-                "healthy"
-                if completed
-                else "attention"
-                if verified > 0
-                else "unknown"
+                "healthy" if completed else "attention" if verified > 0 else "unknown"
             ),
             "total": total,
             "verified": verified,
@@ -1306,9 +1363,7 @@ class DashboardService:
             "completed": completed,
             "updated_at": _iso_timestamp(updated_at),
             "age_seconds": (
-                int(max(0.0, now - updated_at))
-                if updated_at is not None
-                else None
+                int(max(0.0, now - updated_at)) if updated_at is not None else None
             ),
         }
 
@@ -1367,7 +1422,9 @@ class DashboardService:
             },
             {
                 "id": "parse",
-                "status": "ready" if self.db_path.exists() and self._nodes else "missing",
+                "status": "ready"
+                if self.db_path.exists() and self._nodes
+                else "missing",
                 "updated_at": _iso_timestamp(self.db_path.stat().st_mtime)
                 if self.db_path.exists()
                 else None,
@@ -1375,18 +1432,16 @@ class DashboardService:
             },
             {
                 "id": "verify",
-                "status": (
-                    "ready"
-                    if local_verification["completed"]
-                    else "attention"
-                ),
+                "status": ("ready" if local_verification["completed"] else "attention"),
                 "updated_at": local_verification["updated_at"],
                 "verified": verified,
                 "total": len(self._nodes),
             },
             {
                 "id": "emit",
-                "status": "ready" if artifacts and all(a["valid"] for a in artifacts) else "attention",
+                "status": "ready"
+                if artifacts and all(a["valid"] for a in artifacts)
+                else "attention",
                 "updated_at": max(
                     (a["updated_at"] for a in artifacts if a["updated_at"]),
                     default=None,

@@ -56,9 +56,7 @@ def _sample_root(tmp_path: Path) -> tuple[Path, str, str]:
     )
     with closing(sqlite3.connect(tmp_path / "nodes.db")) as conn, conn:
         conn.executescript(
-            (PROJECT_ROOT / "infra" / "d1" / "schema.sql").read_text(
-                encoding="utf-8"
-            )
+            (PROJECT_ROOT / "infra" / "d1" / "schema.sql").read_text(encoding="utf-8")
         )
         conn.execute(
             """INSERT INTO nodes(
@@ -154,9 +152,7 @@ def _pipeline_document(
     healthy = pipeline_status == "healthy"
     return {
         "schema_version": 1,
-        "generated_at": time.strftime(
-            "%Y-%m-%dT%H:%M:%SZ", time.gmtime(generated_at)
-        ),
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(generated_at)),
         "pipeline_status": pipeline_status,
         "verify": {
             "total": 4,
@@ -336,9 +332,7 @@ def test_remote_pipeline_unknown_rejects_inconsistent_artifact_counts(
         lambda document: document.update({"unexpected": "provider-raw-secret"}),
         lambda document: document["verify"].update({"total": True}),
         lambda document: document["verify"].update({"verified": 3}),
-        lambda document: document["artifacts"].update(
-            {"raw": "provider-raw-secret"}
-        ),
+        lambda document: document["artifacts"].update({"raw": "provider-raw-secret"}),
     ],
 )
 def test_remote_pipeline_rejects_malformed_or_extended_schema(
@@ -402,15 +396,9 @@ def test_frontend_only_labels_an_existing_remote_snapshot_as_stale() -> None:
     )
 
     assert "function hasRemoteSnapshot(remote)" in script
-    assert (
-        'stale === true && hasRemoteSnapshot(remote) ? "stale" : "unknown"'
-        in script
-    )
-    assert (
-        'const freshness = !remoteHasSnapshot ? "尚無有效快照"'
-        in script
-    )
-    assert 'else if (!remoteHasSnapshot) setStateNote(' in script
+    assert 'stale === true && hasRemoteSnapshot(remote) ? "stale" : "unknown"' in script
+    assert 'const freshness = !remoteHasSnapshot ? "尚無有效快照"' in script
+    assert "else if (!remoteHasSnapshot) setStateNote(" in script
     assert 'else if (remoteStatus !== "healthy") setStateNote(' in script
 
 
@@ -421,8 +409,7 @@ def test_frontend_does_not_render_missing_remote_age_as_zero_seconds() -> None:
 
     assert (
         'if (value === null || value === undefined || value === "") return "—";\n'
-        "  const seconds = Number(value);"
-        in script
+        "  const seconds = Number(value);" in script
     )
 
 
@@ -519,9 +506,7 @@ def test_service_redacts_credentials_and_persists_sanitized_result(
             "providers": [{"provider": "edge-trace", "ip": "1.1.1.1"}],
         }
     )
-    persisted = (root / "state" / "ip-check-results.jsonl").read_text(
-        encoding="utf-8"
-    )
+    persisted = (root / "state" / "ip-check-results.jsonl").read_text(encoding="utf-8")
     assert raw not in persisted
     assert password not in persisted
     assert "127.0.0.1" not in persisted
@@ -630,12 +615,20 @@ def test_local_verification_with_zero_verified_nodes_remains_unknown(
     assert payload["latest_pipeline"] == payload["latest_run"]
 
 
-def test_ip_parsers_reject_non_public_addresses(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_ip_parsers_reject_non_public_addresses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(
         socket,
         "getaddrinfo",
         lambda *_args, **_kwargs: [
-            (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("127.0.0.1", 443))
+            (
+                socket.AF_INET,
+                socket.SOCK_STREAM,
+                socket.IPPROTO_TCP,
+                "",
+                ("127.0.0.1", 443),
+            )
         ],
     )
     with pytest.raises(ValueError, match="non-public"):
@@ -715,9 +708,7 @@ def test_reputation_provider_parsers_normalize_three_fixed_schemas(
     }
 
 
-def _provider_result(
-    provider: str, risk_score: int, *signals: str
-) -> dict[str, Any]:
+def _provider_result(provider: str, risk_score: int, *signals: str) -> dict[str, Any]:
     return {
         "provider": provider,
         "status": "ok",
@@ -1031,15 +1022,18 @@ def test_purity_sanitizer_drops_secrets_nan_and_unknown_signals() -> None:
     serialized = json.dumps(clean, allow_nan=False)
     assert secret not in serialized
     assert "unknown_signal" not in serialized
-    assert DashboardService._sanitize_ip_result(
-        {
-            "node_id": "a" * 64,
-            "mode": "purity",
-            "status": "passed",
-            "checked_at": 123,
-            "duration_ms": float("nan"),
-        }
-    ) is None
+    assert (
+        DashboardService._sanitize_ip_result(
+            {
+                "node_id": "a" * 64,
+                "mode": "purity",
+                "status": "passed",
+                "checked_at": 123,
+                "duration_ms": float("nan"),
+            }
+        )
+        is None
+    )
 
 
 def _wait_job(manager: IpCheckJobManager, job_id: str) -> dict[str, Any]:
@@ -1055,7 +1049,9 @@ def _wait_job(manager: IpCheckJobManager, job_id: str) -> dict[str, Any]:
 
 def test_job_manager_counts_results_and_contains_worker_exceptions() -> None:
     class Checker:
-        def check(self, node_id: str, mode: str, _cancel: threading.Event) -> dict[str, Any]:
+        def check(
+            self, node_id: str, mode: str, _cancel: threading.Event
+        ) -> dict[str, Any]:
             if node_id.startswith("b"):
                 raise RuntimeError("credential-bearing diagnostic")
             return {
@@ -1101,9 +1097,7 @@ def test_loopback_server_static_security_and_job_persistence(tmp_path: Path) -> 
     server = create_server(root, port=0)
     port = int(server.server_address[1])
 
-    def fake_check(
-        node_id: str, mode: str, _cancel: threading.Event
-    ) -> dict[str, Any]:
+    def fake_check(node_id: str, mode: str, _cancel: threading.Event) -> dict[str, Any]:
         return {
             "node_id": node_id,
             "mode": mode,
@@ -1141,9 +1135,7 @@ def test_loopback_server_static_security_and_job_persistence(tmp_path: Path) -> 
         )
         assert status == 200
 
-        request_body = json.dumps(
-            {"node_ids": [node_id], "mode": "endpoint"}
-        ).encode()
+        request_body = json.dumps({"node_ids": [node_id], "mode": "endpoint"}).encode()
         status, _headers, body = _request(
             port,
             "POST",
@@ -1228,9 +1220,7 @@ def test_server_accepts_purity_job_and_fails_closed_without_capability(
         "Content-Type": "application/json",
         "Origin": f"http://127.0.0.1:{port}",
     }
-    request_body = json.dumps(
-        {"node_ids": [node_id], "mode": "purity"}
-    ).encode()
+    request_body = json.dumps({"node_ids": [node_id], "mode": "purity"}).encode()
     try:
         status, _headers, body = _request(
             port,

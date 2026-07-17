@@ -294,7 +294,9 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             return
         parsed = urlsplit(self.path)
         if parsed.path.startswith("/api/"):
-            self._handle_api_get(parsed.path, parse_qs(parsed.query, keep_blank_values=True))
+            self._handle_api_get(
+                parsed.path, parse_qs(parsed.query, keep_blank_values=True)
+            )
             return
         if parsed.query:
             self._error(HTTPStatus.NOT_FOUND, "not_found")
@@ -437,7 +439,10 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         if (
             not isinstance(node_ids, list)
             or not 1 <= len(node_ids) <= 20
-            or any(not isinstance(value, str) or not _NODE_ID_RE.fullmatch(value) for value in node_ids)
+            or any(
+                not isinstance(value, str) or not _NODE_ID_RE.fullmatch(value)
+                for value in node_ids
+            )
         ):
             self._error(HTTPStatus.BAD_REQUEST, "invalid_node_ids")
             return
@@ -508,6 +513,7 @@ def create_server(
         raise ValueError("dashboard root does not exist")
 
     if ":" in host:
+
         class IPv6DashboardHTTPServer(DashboardHTTPServer):
             address_family = socket.AF_INET6
 

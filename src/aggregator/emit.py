@@ -94,7 +94,9 @@ def validate_pipeline_status(document: object) -> dict:
         raise InvalidPipelineStatus(
             "generated_at must be an RFC3339 UTC timestamp"
         ) from exc
-    if parsed_at.tzinfo is None or parsed_at.utcoffset() != timezone.utc.utcoffset(None):
+    if parsed_at.tzinfo is None or parsed_at.utcoffset() != timezone.utc.utcoffset(
+        None
+    ):
         raise InvalidPipelineStatus("generated_at must be UTC")
 
     verify = document["verify"]
@@ -191,7 +193,9 @@ def _pipeline_status_document(
     if _count(verify_summary.get("total_alive"), "total_alive") != alive:
         raise InvalidPipelineStatus("verify alive count does not match live snapshot")
     if _count(verify_summary.get("unverified"), "unverified") != unverified:
-        raise InvalidPipelineStatus("verify unverified count does not match live snapshot")
+        raise InvalidPipelineStatus(
+            "verify unverified count does not match live snapshot"
+        )
 
     document = {
         "schema_version": PIPELINE_STATUS_SCHEMA_VERSION,
@@ -289,9 +293,7 @@ def validate_pipeline_status_artifact(
 
     if not isinstance(clash, dict) or not isinstance(clash.get("proxies"), list):
         raise InvalidPipelineStatus("clash artifact has an invalid proxy list")
-    if not isinstance(singbox, dict) or not isinstance(
-        singbox.get("outbounds"), list
-    ):
+    if not isinstance(singbox, dict) or not isinstance(singbox.get("outbounds"), list):
         raise InvalidPipelineStatus("sing-box artifact has an invalid outbound list")
     actual = {
         "node_count": len([line for line in decoded.splitlines() if line.strip()]),
