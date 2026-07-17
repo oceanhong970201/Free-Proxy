@@ -194,7 +194,12 @@ function parseCredentialUri(uri: string): CredentialUri {
   const hashAt = uri.indexOf("#", schemeAt + 3);
   const fragment = hashAt >= 0 ? uri.slice(hashAt + 1) : "";
   const withoutFragment = hashAt >= 0 ? uri.slice(0, hashAt) : uri;
-  const at = withoutFragment.lastIndexOf("@");
+  // A transport path or another query value may legitimately contain a raw
+  // `@`.  Only the authority section can contain the credential delimiter;
+  // searching the complete URI would mistake a query value for the endpoint.
+  const queryAt = withoutFragment.indexOf("?", schemeAt + 3);
+  const authorityEnd = queryAt >= 0 ? queryAt : withoutFragment.length;
+  const at = withoutFragment.lastIndexOf("@", authorityEnd - 1);
   if (schemeAt < 0 || at <= schemeAt + 3) throw new Error("missing credential or endpoint");
   const credential = decodeComponent(withoutFragment.slice(schemeAt + 3, at));
   const endpoint = withoutFragment.slice(at + 1);

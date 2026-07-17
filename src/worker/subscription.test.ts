@@ -46,6 +46,23 @@ describe("URI to Clash conversion", () => {
     expect(proxy).not.toHaveProperty("path");
   });
 
+  it("keeps a raw at-sign inside transport query values out of authority parsing", () => {
+    expect(uriToClashProxy(
+      "trojan://secret@example.com:2083?security=tls&type=ws&" +
+      "path=/---@channel/route&host=edge.example&sni=origin.example#query-at"
+    )).toMatchObject({
+      type: "trojan",
+      server: "example.com",
+      port: 2083,
+      password: "secret",
+      network: "ws",
+      "ws-opts": {
+        path: "/---@channel/route",
+        headers: { Host: "edge.example" },
+      },
+    });
+  });
+
   it("maps VLESS packet encoding and Reality spider-x while accepting the default gRPC mode", () => {
     expect(uriToClashProxy(
       "vless://user-id@example.com:443?security=reality&type=grpc&serviceName=proxy&mode=gun&authority=&" +
