@@ -241,6 +241,27 @@ describe("snapshot import", () => {
     }
   });
 
+  it("imports credential URIs on explicit port 80", async () => {
+    const uri = "vless://id@example.com:80?security=none&type=ws#port-80";
+    const { env, batches } = fakeEnvironment({ expectedCount: 1 });
+    const response = await handleImport(snapshotRequest({
+      version: 1,
+      snapshot_id: "run-1",
+      expected_count: 1,
+      nodes: [{
+        uri,
+        alive: true,
+        model: {
+          proto: "vless", host: "example.com", port: 80, uuid: "id",
+          security: "none", tls: false, net: "ws", raw: uri, alive: true,
+        },
+      }],
+    }), env);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ ok: true, complete: true, imported: 1 });
+    expect(batches).toHaveLength(1);
+  });
+
   it("requires a matching complete model for JSON snapshots", async () => {
     for (const node of [
       { uri: trojanUri, alive: true },

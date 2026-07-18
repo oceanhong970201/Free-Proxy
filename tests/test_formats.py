@@ -462,6 +462,10 @@ def test_vmess_alter_id_and_httpupgrade_round_trip() -> None:
     assert node_dedup_key(node) != node_dedup_key(changed)
 
 
+def test_vmess_parser_rejects_trailing_base64_garbage() -> None:
+    assert parse_uri(f"{_vmess_uri()}=vmess") is None
+
+
 def test_xhttp_is_native_in_clash_and_explicitly_unsupported_in_singbox() -> None:
     node = parse_uri(_vmess_uri(net="xhttp", type="packet-up", path="/xhttp"))
     assert node is not None

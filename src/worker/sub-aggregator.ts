@@ -409,7 +409,7 @@ async function parseSnapshotRequest(request: Request): Promise<SnapshotImport> {
     if (!Number.isInteger(expectedCount) || expectedCount < 1 || expectedCount !== body.nodes.length) {
       throw new Error("expected_count does not match nodes length");
     }
-    const nodes = body.nodes.map((node) => validateSnapshotNode(node, true));
+    const nodes = body.nodes.map((node, index) => validateSnapshotNode(node, true, index));
     validateSnapshotSet(nodes);
     return { version: 1, snapshotId: body.snapshot_id, expectedCount, nodes, legacy: false };
   }
@@ -432,7 +432,7 @@ async function parseSnapshotRequest(request: Request): Promise<SnapshotImport> {
   };
 }
 
-function validateSnapshotNode(value: unknown, requireModel = false): SnapshotNodeInput {
+function validateSnapshotNode(value: unknown, requireModel = false, index?: number): SnapshotNodeInput {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("each node must be an object");
   const node = value as Record<string, unknown>;
   if (typeof node.uri !== "string") throw new Error("each node requires a URI");
@@ -440,7 +440,7 @@ function validateSnapshotNode(value: unknown, requireModel = false): SnapshotNod
   if (node.alive !== true) throw new Error("snapshot nodes must have alive=true");
   let latency = optionalMetric(node.latency_ms, "latency_ms", true);
   let speed = optionalMetric(node.download_speed, "download_speed");
-  const model = requireModel ? validateProxyModel(node.model, uri) : null;
+  const model = requireModel ? validateProxyModel(node.model, uri, index) : null;
   if (model) {
     const modelLatency = optionalMetric(model.latency_ms, "model.latency_ms", true);
     const modelSpeed = optionalMetric(model.download_speed, "model.download_speed");
@@ -456,7 +456,7 @@ function validateSnapshotNode(value: unknown, requireModel = false): SnapshotNod
   return { uri, alive: true, latency_ms: latency, download_speed: speed, model };
 }
 
-function validateProxyModel(value: unknown, uri: string): Record<string, unknown> {
+function validateProxyModel(value: unknown, uri: string, index?: number): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("each JSON snapshot node requires a model object");
   }
@@ -488,10 +488,11 @@ function validateProxyModel(value: unknown, uri: string): Record<string, unknown
     throw new Error("model.alter_id must be a non-negative integer or null");
   }
   const rendered = uriToClashProxy(uri);
-  if (!rendered) throw new Error("model URI is unsupported, malformed, or not representable in Clash");
+  const location = index === undefined ? "" : ` at index ${index}`;
+  if (!rendered) throw new Error(`model URI${location} is unsupported, malformed, or not representable in Clash`);
   if (String(rendered.type) !== model.proto || String(rendered.server).toLowerCase() !== model.host.toLowerCase() ||
       Number(rendered.port) !== model.port) {
-    throw new Error("model connection does not match uri");
+    throw new Error(`model connection${location} does not match uri`);
   }
   return model;
 }

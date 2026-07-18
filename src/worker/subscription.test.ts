@@ -63,6 +63,25 @@ describe("URI to Clash conversion", () => {
     });
   });
 
+  it("retains explicit port 80 for credential and Shadowsocks URIs", () => {
+    expect(uriToClashProxy(
+      "vless://user-id@example.com:80?security=none&type=ws&path=%2Fws#vless-80"
+    )).toMatchObject({ type: "vless", server: "example.com", port: 80 });
+    expect(uriToClashProxy(
+      "trojan://secret@example.com:80?security=tls#trojan-80"
+    )).toMatchObject({ type: "trojan", server: "example.com", port: 80 });
+    expect(uriToClashProxy(
+      "hysteria2://secret@example.com:80?security=tls#hy2-80"
+    )).toMatchObject({ type: "hysteria2", server: "example.com", port: 80 });
+
+    const credential = urlSafeBase64("aes-128-gcm:secret");
+    expect(uriToClashProxy(`ss://${credential}@example.com:80#ss-80`)).toMatchObject({
+      type: "ss",
+      server: "example.com",
+      port: 80,
+    });
+  });
+
   it("maps VLESS packet encoding and Reality spider-x while accepting the default gRPC mode", () => {
     expect(uriToClashProxy(
       "vless://user-id@example.com:443?security=reality&type=grpc&serviceName=proxy&mode=gun&authority=&" +

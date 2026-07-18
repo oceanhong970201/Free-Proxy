@@ -31,6 +31,23 @@ def _b64decode_loose(value: str) -> str:
         return ""
 
 
+def _b64decode_strict(value: str) -> str:
+    """Decode URL-safe base64 while rejecting trailing or embedded garbage."""
+    value = value.strip().replace("-", "+").replace("_", "/")
+    if (
+        not value
+        or len(value) % 4 == 1
+        or not re.fullmatch(r"[A-Za-z0-9+/]*={0,2}", value)
+    ):
+        return ""
+    value = value.rstrip("=")
+    value += "=" * (-len(value) % 4)
+    try:
+        return base64.b64decode(value, validate=True).decode("utf-8")
+    except Exception:
+        return ""
+
+
 def _b64encode_urlsafe(value: str) -> str:
     return base64.urlsafe_b64encode(value.encode("utf-8")).decode("ascii").rstrip("=")
 
@@ -259,7 +276,7 @@ def extract_uris(text: str) -> list[str]:
 
 
 def _parse_vmess(uri: str) -> ProxyNode | None:
-    raw_json = _b64decode_loose(uri[len("vmess://") :])
+    raw_json = _b64decode_strict(uri[len("vmess://") :])
     if not raw_json:
         return None
     try:

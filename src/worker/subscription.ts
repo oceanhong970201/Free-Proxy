@@ -203,7 +203,9 @@ function parseCredentialUri(uri: string): CredentialUri {
   if (schemeAt < 0 || at <= schemeAt + 3) throw new Error("missing credential or endpoint");
   const credential = decodeComponent(withoutFragment.slice(schemeAt + 3, at));
   const endpoint = withoutFragment.slice(at + 1);
-  const parsed = new URL(`http://${endpoint}`);
+  // Use a non-special URL scheme so WHATWG URL does not normalize explicit
+  // default ports (for example `:80`) to an empty string.
+  const parsed = new URL(`proxy://${endpoint}`);
   const host = stripIpv6Brackets(parsed.hostname);
   if (!credential || !host) throw new Error("missing credential or host");
   return {
@@ -355,7 +357,8 @@ function parseSs(uri: string): ClashProxy {
   if (separator <= 0) throw new Error("ss is missing cipher or password");
   const method = decodeComponent(userInfo.slice(0, separator));
   const password = decodeComponent(userInfo.slice(separator + 1));
-  const parsed = new URL(`http://x@${endpoint}`);
+  // The synthetic scheme must retain explicit default ports such as `:80`.
+  const parsed = new URL(`proxy://x@${endpoint}`);
   const host = stripIpv6Brackets(parsed.hostname);
   const port = requiredPort(parsed.port);
   if (!host || !method || !password) throw new Error("ss is missing host, cipher, or password");
