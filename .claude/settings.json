@@ -16,46 +16,17 @@
           { "type": "command", "command": "bash ${CLAUDE_PROJECT_DIR}/.claude/hooks/deny-destructive.sh" }
         ]
       }
-    ],
-    "PostToolUse": [
-      {
-        "matcher": "Write|Edit",
-        "hooks": [
-          { "type": "command", "command": "bash ${CLAUDE_PROJECT_DIR}/.claude/hooks/after-write.sh" }
-        ]
-      }
-    ],
-    "Stop": [
-      {
-        "matcher": "*",
-        "hooks": [
-          { "type": "command", "command": "bash ${CLAUDE_PROJECT_DIR}/.claude/hooks/stop-check.sh" }
-        ]
-      }
-    ],
-    "SubagentStop": [
-      {
-        "matcher": "*",
-        "hooks": [
-          { "type": "command", "command": "bash ${CLAUDE_PROJECT_DIR}/.claude/hooks/stop-check.sh" }
-        ]
-      }
     ]
   },
   "permissions": {
     "allow": [
-      "Bash(python *)",
-      "Bash(httpx *)",
-      "Bash(curl *)",
-      "Bash(git *)",
-      "Bash(clash-speedtest *)",
-      "Read",
-      "Write",
-      "WebFetch",
-      "WebSearch"
+      "Read"
     ],
     "deny": [
-      "Bash(rm -rf *)"
+      "Bash(rm -rf *)",
+      "Bash(git clean *)",
+      "Bash(git reset --hard *)",
+      "Bash(git push --force *)"
     ]
   },
   "model": "",

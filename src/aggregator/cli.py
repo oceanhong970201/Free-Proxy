@@ -19,9 +19,11 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -31,19 +33,24 @@ if __package__ is None or "" in __name__.split("."):
     _SRC = Path(__file__).resolve().parents[1]
     if str(_SRC) not in sys.path:
         sys.path.insert(0, str(_SRC))
-    from aggregator import fetcher, parser, dedupe, emit  # noqa: E402
-    from aggregator import resin_publisher  # noqa: E402
+    from aggregator import fetcher, parser, dedupe, emit, source_audit  # noqa: E402
+    from aggregator import gray_sources, resin_publisher, scanner  # noqa: E402
     from aggregator import self_nodes, ct_recon  # noqa: E402
     from aggregator import github_dork  # noqa: E402
     from aggregator import v2board_recon, tg_recon  # noqa: E402
-    from aggregator.models import ProxyNode  # noqa: E402
+    from aggregator.models import (  # noqa: E402
+        SEMANTIC_KEY_VERSION,
+        STABLE_SAMPLE_SEED,
+        ProxyNode,
+        Source,
+    )
 else:
-    from . import fetcher, parser, dedupe, emit
-    from . import resin_publisher  # noqa: E402
+    from . import fetcher, parser, dedupe, emit, source_audit
+    from . import gray_sources, resin_publisher, scanner  # noqa: E402
     from . import self_nodes, ct_recon  # noqa: E402
     from . import github_dork  # noqa: E402
     from . import v2board_recon, tg_recon  # noqa: E402
-    from .models import ProxyNode
+    from .models import SEMANTIC_KEY_VERSION, STABLE_SAMPLE_SEED, ProxyNode, Source
 
 import typer  # noqa: E402
 from rich.console import Console  # noqa: E402
@@ -60,8 +67,15 @@ app = typer.Typer(help="Free-Proxy aggregator CLI.")
 console = Console()
 
 VERIFY_PROGRESS_SCHEMA_VERSION = 4
+CANARY_GATE_SCHEMA_VERSION = 1
+CANARY_HISTORY_SCHEMA_VERSION = 2
 TIER1_BATCH_SIZE = 50
 TIER2_BATCH_SIZE = 30
+DEFAULT_MAX_TOTAL_NODES = 1800
+DEFAULT_CANARY_MAX_TOTAL_NODES = 650
+DEFAULT_CANARY_HISTORY = "state/source-canary-history.jsonl"
+DEFAULT_CANARY_REQUIRED_RUNS = 3
+DEFAULT_CANARY_WINDOW_HOURS = 48
 
 
 def _now() -> int:
@@ -162,13 +176,71 @@ def _fetch_logic() -> dict:
     return summary
 
 
+def _stable_node_hash(node: ProxyNode) -> str:
+    """Return the deterministic ranking key used by ``stable_hash`` sampling."""
+
+    payload = f"{STABLE_SAMPLE_SEED}\0{dedupe.normalize_node(node)}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _sample_source_nodes(
+    nodes: list[ProxyNode], source: Source
+) -> tuple[list[ProxyNode], int, int]:
+    """Deduplicate and optionally sample one source's nodes.
+
+    The returned tuple is ``(accepted, semantic_duplicates, truncated)``.  A
+    source is deduplicated before applying its limit so ``max_nodes`` counts
+    accepted semantic connections rather than repeated URI spellings.  The
+    final list retains the source's original order among selected nodes; only
+    membership is hash-ranked, which keeps existing snapshots readable while
+    making the selected set independent of upstream ordering.
+    """
+
+    if source.sample_strategy != "stable_hash":
+        # ``Source`` validation normally catches this. Keep the guard here so
+        # callers constructing a model without validation still fail closed.
+        raise ValueError(
+            f"unsupported source sample strategy: {source.sample_strategy}"
+        )
+
+    unique, dropped = dedupe.dedupe_nodes(nodes)
+    max_nodes = source.max_nodes
+    if max_nodes is None or len(unique) <= max_nodes:
+        return unique, len(dropped), 0
+
+    ranked = sorted(
+        unique,
+        key=lambda node: (_stable_node_hash(node), node.dedup_key(), node.raw),
+    )
+    selected_keys = {node.dedup_key() for node in ranked[:max_nodes]}
+    accepted = [node for node in unique if node.dedup_key() in selected_keys]
+    return accepted, len(dropped), len(unique) - len(accepted)
+
+
+def _parse_node_cap() -> tuple[int, str]:
+    """Read the hard accepted-node cap for normal or canary parsing."""
+
+    quality = _load_quality()
+    if not isinstance(quality, dict):
+        raise ValueError("quality configuration must be a mapping")
+    canary = os.environ.get("SOURCE_CANARY") == "1"
+    key = "canary_max_total_nodes" if canary else "max_total_nodes"
+    default = DEFAULT_CANARY_MAX_TOTAL_NODES if canary else DEFAULT_MAX_TOTAL_NODES
+    value = quality.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(f"quality {key} must be a positive integer")
+    return value, key
+
+
 def _parse_logic() -> dict:
     if not STAGING.exists():
         console.print("[red]no staging.jsonl — parse aborted")
         summary = {
             "raw_nodes": 0,
+            "sampled": 0,
             "unique": 0,
             "duplicates": 0,
+            "truncated_by_source": {},
             "success": False,
             "error": "no staging.jsonl",
         }
@@ -214,8 +286,21 @@ def _parse_logic() -> dict:
     enabled_ids = {
         sid for sid, source in sources_by_id.items() if source.get("enabled")
     }
+    source_models: dict[str, Source] = {}
+    source_config_errors: dict[str, str] = {}
+    for sid in sorted(enabled_ids):
+        try:
+            source_models[sid] = Source.model_validate(sources_by_id[sid])
+        except (TypeError, ValueError) as exc:
+            source_config_errors[sid] = str(exc)
+
+    # Keep the pre-dedup parser count for the existing ``raw_nodes`` metric;
+    # ``accepted_nodes`` is the bounded projection persisted to the snapshot.
     raw_nodes: list[ProxyNode] = []
+    accepted_nodes: list[ProxyNode] = []
     src_counts: dict[str, int] = {}
+    source_duplicate_counts: dict[str, int] = {}
+    truncated_by_source: dict[str, int] = {}
     staged_sources: set[str] = set()
     invalid_records = 0
     rejected_sources: set[str] = set()
@@ -247,6 +332,9 @@ def _parse_logic() -> dict:
             duplicate_sources.add(sid)
             continue
         staged_sources.add(sid)
+        if sid in source_config_errors:
+            invalid_records += 1
+            continue
         src_fmt = sources_by_id[sid].get("format")
         if not isinstance(src_fmt, str) or not src_fmt:
             invalid_records += 1
@@ -259,10 +347,23 @@ def _parse_logic() -> dict:
         for n in nodes:
             n.source = sid
         raw_nodes.extend(nodes)
-        src_counts[sid] = src_counts.get(sid, 0) + len(nodes)
+        try:
+            accepted, source_duplicates, truncated = _sample_source_nodes(
+                nodes, source_models[sid]
+            )
+        except (TypeError, ValueError):
+            invalid_records += 1
+            continue
+        accepted_nodes.extend(accepted)
+        src_counts[sid] = len(accepted)
+        source_duplicate_counts[sid] = source_duplicates
+        if truncated:
+            truncated_by_source[sid] = truncated
 
     missing_sources = sorted(enabled_ids - staged_sources)
     empty_sources = sorted(sid for sid in enabled_ids if src_counts.get(sid, 0) == 0)
+    sampled_count = len(accepted_nodes)
+    source_duplicates = sum(source_duplicate_counts.values())
     if (
         invalid_records
         or missing_sources
@@ -272,11 +373,14 @@ def _parse_logic() -> dict:
     ):
         summary = {
             "raw_nodes": len(raw_nodes),
+            "sampled": sampled_count,
             "unique": 0,
-            "duplicates": 0,
+            "duplicates": source_duplicates,
             "by_source": src_counts,
+            "truncated_by_source": truncated_by_source,
             "success": False,
             "invalid_records": invalid_records,
+            "source_config_errors": source_config_errors,
             "missing_sources": missing_sources,
             "empty_sources": empty_sources,
             "rejected_sources": sorted(rejected_sources),
@@ -286,14 +390,48 @@ def _parse_logic() -> dict:
         _write_last_run(1, {"parse": summary}, extra={"last_stage_cmd": "parse"})
         return summary
 
-    unique, dropped = dedupe.dedupe_nodes(raw_nodes)
+    try:
+        max_total_nodes, max_total_key = _parse_node_cap()
+    except (TypeError, ValueError) as exc:
+        summary = {
+            "raw_nodes": len(raw_nodes),
+            "sampled": sampled_count,
+            "unique": 0,
+            "duplicates": source_duplicates,
+            "by_source": src_counts,
+            "truncated_by_source": truncated_by_source,
+            "success": False,
+            "error": f"invalid quality node cap: {exc}",
+        }
+        _write_last_run(1, {"parse": summary}, extra={"last_stage_cmd": "parse"})
+        return summary
+    if sampled_count > max_total_nodes:
+        summary = {
+            "raw_nodes": len(raw_nodes),
+            "sampled": sampled_count,
+            "unique": 0,
+            "duplicates": source_duplicates,
+            "by_source": src_counts,
+            "truncated_by_source": truncated_by_source,
+            "success": False,
+            "error": (
+                f"accepted sampled node count {sampled_count} exceeds "
+                f"{max_total_key}={max_total_nodes}; prior DB/live snapshot retained"
+            ),
+        }
+        _write_last_run(1, {"parse": summary}, extra={"last_stage_cmd": "parse"})
+        return summary
+
+    unique, dropped = dedupe.dedupe_nodes(accepted_nodes)
     chash = dedupe.content_hash(unique)
     if not unique:
         summary = {
             "raw_nodes": len(raw_nodes),
+            "sampled": sampled_count,
             "unique": 0,
-            "duplicates": len(dropped),
+            "duplicates": source_duplicates + len(dropped),
             "by_source": src_counts,
+            "truncated_by_source": truncated_by_source,
             "success": False,
             "error": "parser produced no nodes; prior DB/live snapshot retained",
         }
@@ -451,7 +589,10 @@ def _parse_logic() -> dict:
         summary = {
             "raw_nodes": len(raw_nodes),
             "unique": len(unique),
-            "duplicates": len(dropped),
+            "sampled": sampled_count,
+            "duplicates": source_duplicates + len(dropped),
+            "by_source": src_counts,
+            "truncated_by_source": truncated_by_source,
             "success": False,
             "error": f"snapshot activation failed: {e}{recovery_note}",
         }
@@ -462,9 +603,11 @@ def _parse_logic() -> dict:
 
     summary = {
         "raw_nodes": len(raw_nodes),
+        "sampled": sampled_count,
         "unique": len(unique),
-        "duplicates": len(dropped),
+        "duplicates": source_duplicates + len(dropped),
         "by_source": src_counts,
+        "truncated_by_source": truncated_by_source,
         "content_hash": chash,
         "success": True,
     }
@@ -1101,6 +1244,132 @@ def _verify_logic(max_runtime: int | None = None) -> dict:
     return summary
 
 
+def _verify_candidate_isolated(
+    nodes: list[ProxyNode], *, max_runtime: int | None = None
+) -> dict:
+    """Run the production verifier against candidate nodes in a temp snapshot.
+
+    ``_verify_logic`` intentionally operates on the configured SQLite/live
+    projections.  Canary review must use the exact same verifier contract while
+    keeping those projections untouched, so this adapter swaps only the four
+    runtime paths for the duration of the call and restores them unconditionally.
+    """
+
+    if not nodes:
+        return {
+            "completed": False,
+            "success": False,
+            "tier1_tested": 0,
+            "tier1_alive": 0,
+            "tier2_tested": 0,
+            "tier2_passed": 0,
+            "error": "candidate has no verifier-eligible nodes",
+        }
+
+    global STATE, DB, LIVE, LAST_RUN
+    original_paths = (STATE, DB, LIVE, LAST_RUN)
+    try:
+        with tempfile.TemporaryDirectory(prefix="source-canary-") as temp_dir:
+            temp_root = Path(temp_dir)
+            temp_state = temp_root / "state"
+            temp_state.mkdir(parents=True, exist_ok=True)
+            STATE = temp_state
+            DB = temp_root / "nodes.db"
+            LIVE = temp_state / "live.jsonl"
+            LAST_RUN = temp_state / "last-run.json"
+
+            conn = _init_db()
+            try:
+                for node in nodes:
+                    snapshot_node = node.model_copy(
+                        update={
+                            "alive": None,
+                            "latency_ms": None,
+                            "download_speed": None,
+                        }
+                    )
+                    conn.execute(
+                        """INSERT INTO nodes(
+                               uri, node_json, source, alive, latency_ms,
+                               download_speed
+                           ) VALUES(?,?,?,?,?,?)""",
+                        (
+                            snapshot_node.raw,
+                            json.dumps(
+                                snapshot_node.model_dump(mode="json"),
+                                ensure_ascii=False,
+                            ),
+                            snapshot_node.source,
+                            None,
+                            None,
+                            None,
+                        ),
+                    )
+                conn.commit()
+            finally:
+                conn.close()
+
+            summary = _verify_logic(max_runtime=max_runtime)
+            if LIVE.exists():
+                verified_nodes: list[ProxyNode] = []
+                for line in LIVE.read_text(encoding="utf-8").splitlines():
+                    if not line.strip():
+                        continue
+                    try:
+                        verified_nodes.append(
+                            ProxyNode.model_validate(json.loads(line))
+                        )
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        continue
+                tier1_nodes = [node for node in verified_nodes if node.alive is True]
+                tier2_nodes = [
+                    node
+                    for node in tier1_nodes
+                    if isinstance(node.download_speed, (int, float))
+                ]
+                latencies = sorted(
+                    node.latency_ms
+                    for node in tier1_nodes
+                    if isinstance(node.latency_ms, int)
+                )
+                summary["tier1_alive_keys"] = sorted(
+                    {node.dedup_key() for node in tier1_nodes}
+                )
+                summary["tier2_passed_keys"] = sorted(
+                    {node.dedup_key() for node in tier2_nodes}
+                )
+                summary["tier2_protocol_counts"] = {
+                    proto: sum(node.proto == proto for node in tier2_nodes)
+                    for proto in sorted({node.proto for node in tier2_nodes})
+                }
+                # Keep the protocol beside the opaque semantic key so the
+                # batch diversity gate can distinguish genuinely net-new
+                # protocol families from nodes already in the baseline.
+                summary["tier2_protocol_by_key"] = {
+                    node.dedup_key(): node.proto for node in tier2_nodes
+                }
+                if latencies:
+                    middle = len(latencies) // 2
+                    summary["median_latency_ms"] = (
+                        float(latencies[middle])
+                        if len(latencies) % 2
+                        else (latencies[middle - 1] + latencies[middle]) / 2
+                    )
+            return summary
+    except Exception as exc:  # pragma: no cover - defensive integration guard
+        return {
+            "completed": False,
+            "success": False,
+            "tier1_tested": 0,
+            "tier1_alive": 0,
+            "tier2_tested": 0,
+            "tier2_passed": 0,
+            "error": f"isolated candidate verifier failed: {type(exc).__name__}: {exc}",
+        }
+    finally:
+        STATE, DB, LIVE, LAST_RUN = original_paths
+
+
 def _publish_logic(strict: bool = False) -> dict:
     """Publish one complete, verified snapshot to the Cloudflare Worker."""
     import httpx
@@ -1287,6 +1556,995 @@ def _ensure_success(stage: str, summary: dict) -> None:
         raise typer.Exit(code=1)
 
 
+def _audit_path(value: Path | None, default: Path) -> Path:
+    path = value if value is not None else default
+    return path if path.is_absolute() else ROOT / path
+
+
+def _apply_canary_gates(
+    report: dict,
+    *,
+    verify_enabled: bool,
+    baseline_path: Path,
+    mirror_threshold: float = 0.80,
+    max_unsupported_ratio: float = 0.20,
+    max_overlap_ratio: float = 0.90,
+    reject_private_reserved: bool = True,
+    required_runs: int = DEFAULT_CANARY_REQUIRED_RUNS,
+    minimum_window_hours: int = DEFAULT_CANARY_WINDOW_HOURS,
+    require_batch_diversity: bool = True,
+) -> dict:
+    """Apply one run's source-quality gates to a completed audit report.
+
+    The separate ``_update_canary_history`` step adds the multi-run promotion
+    gate without making the first two scheduled canaries fail just because
+    they are still warming the required history window.
+    """
+
+    baseline_nodes, _invalid, baseline_error = source_audit.load_baseline(baseline_path)
+    baseline_keys = {node.dedup_key() for node in baseline_nodes}
+    overall_reasons: list[str] = []
+    net_new_tier2_protocols: set[str] = set()
+    passing_sources = 0
+
+    for result in report.get("results", []):
+        reasons: list[str] = []
+        source_id = str(result.get("id") or "unknown")
+        unique_count = int(result.get("unique", 0) or 0)
+        if result.get("status") != "ok":
+            reasons.append(f"audit status is {result.get('status')}")
+        http_status = result.get("http_status")
+        if (
+            isinstance(http_status, bool)
+            or not isinstance(http_status, int)
+            or not 200 <= http_status < 300
+        ):
+            reasons.append(f"fetch status {http_status!r} is not HTTP 2xx")
+        if unique_count < 1:
+            reasons.append("parser produced no accepted nodes")
+        unsupported_ratio = result.get("unsupported_ratio")
+        if not isinstance(unsupported_ratio, (int, float)):
+            reasons.append("unsupported/invalid ratio could not be measured")
+        elif unsupported_ratio > max_unsupported_ratio:
+            reasons.append(
+                "unsupported/invalid ratio "
+                f"{unsupported_ratio:.3f} exceeds {max_unsupported_ratio:.2f}"
+            )
+        if (
+            reject_private_reserved
+            and int(result.get("private_reserved_count", 0) or 0) > 0
+        ):
+            reasons.append("source contains private or reserved endpoints")
+        if float(result.get("overlap_ratio", 0.0) or 0.0) > max_overlap_ratio:
+            reasons.append(f"semantic overlap exceeds {max_overlap_ratio:.2f}")
+
+        eligible_mirrors: list[str] = []
+        rejected_mirrors: list[str] = []
+        unavailable_mirrors: list[str] = []
+        for mirror_url, value in (result.get("mirror_jaccards") or {}).items():
+            if isinstance(value, (int, float)) and value >= mirror_threshold:
+                eligible_mirrors.append(str(mirror_url))
+            elif isinstance(value, (int, float)):
+                rejected_mirrors.append(str(mirror_url))
+            else:
+                unavailable_mirrors.append(str(mirror_url))
+        result["mirror_policy"] = {
+            "minimum_jaccard": mirror_threshold,
+            "production_eligible": sorted(eligible_mirrors),
+            "rejected": sorted(rejected_mirrors),
+            "unavailable": sorted(unavailable_mirrors),
+        }
+        fetched_url = str(result.get("fetched_url") or "")
+        primary_url = str(result.get("url") or "")
+        if fetched_url and fetched_url != primary_url:
+            fallback_jaccard = (result.get("mirror_jaccards") or {}).get(fetched_url)
+            if (
+                not isinstance(fallback_jaccard, (int, float))
+                or fallback_jaccard < mirror_threshold
+            ):
+                reasons.append(
+                    "primary fetch failed and fallback mirror is not production-eligible"
+                )
+
+        if verify_enabled:
+            verification = result.get("verification") or {}
+            tier1_alive = int(verification.get("tier1_alive", 0) or 0)
+            tier2_passed = int(verification.get("tier2_passed", 0) or 0)
+            tier1_minimum = max(5, (unique_count + 9) // 10)
+            tier2_minimum = max(5, (unique_count + 19) // 20)
+            tier2_keys = {
+                str(value)
+                for value in verification.pop("tier2_passed_keys", [])
+                if isinstance(value, str)
+            }
+            tier2_protocol_by_key = verification.pop("tier2_protocol_by_key", {})
+            if not isinstance(tier2_protocol_by_key, dict):
+                tier2_protocol_by_key = {}
+            tier1_keys = {
+                str(value)
+                for value in verification.pop("tier1_alive_keys", [])
+                if isinstance(value, str)
+            }
+            net_new_tier2 = len(tier2_keys - baseline_keys)
+            net_new_tier2_protocol_counts: dict[str, int] = {}
+            for key in tier2_keys - baseline_keys:
+                proto = tier2_protocol_by_key.get(key)
+                if isinstance(proto, str) and proto:
+                    net_new_tier2_protocol_counts[proto] = (
+                        net_new_tier2_protocol_counts.get(proto, 0) + 1
+                    )
+            # Preserve compatibility with injected verifier summaries that do
+            # not yet expose key-to-protocol metadata; the production verifier
+            # always supplies it, so real runs use the net-new calculation.
+            if not tier2_protocol_by_key:
+                protocol_counts = verification.get("tier2_protocol_counts") or {}
+                net_new_tier2_protocol_counts = {
+                    str(proto): int(count)
+                    for proto, count in protocol_counts.items()
+                    if isinstance(count, int) and count > 0
+                }
+            net_new_tier2_protocols.update(net_new_tier2_protocol_counts)
+            verification["net_new_tier2"] = net_new_tier2
+            verification["net_new_tier2_protocol_counts"] = dict(
+                sorted(net_new_tier2_protocol_counts.items())
+            )
+            verification["tier1_alive_key_count"] = len(tier1_keys)
+            verification["tier2_passed_key_count"] = len(tier2_keys)
+            verification["tier1_alive_key_sha256"] = hashlib.sha256(
+                "\n".join(sorted(tier1_keys)).encode("ascii")
+            ).hexdigest()
+            verification["tier2_passed_key_sha256"] = hashlib.sha256(
+                "\n".join(sorted(tier2_keys)).encode("ascii")
+            ).hexdigest()
+            result["verification"] = verification
+
+            if verification.get("success") is not True:
+                reasons.append(
+                    str(verification.get("error") or "candidate verification failed")
+                )
+            if tier1_alive < tier1_minimum:
+                reasons.append(f"Tier-1 alive {tier1_alive} is below {tier1_minimum}")
+            if tier2_passed < tier2_minimum:
+                reasons.append(f"Tier-2 passed {tier2_passed} is below {tier2_minimum}")
+            if net_new_tier2 < 5:
+                reasons.append(f"net-new Tier-2 {net_new_tier2} is below 5")
+
+        result["gate"] = {
+            "passed": not reasons,
+            "reasons": reasons,
+            "mirror_jaccard_minimum": mirror_threshold,
+            "max_unsupported_ratio": max_unsupported_ratio,
+        }
+        if reasons:
+            overall_reasons.extend(f"{source_id}: {reason}" for reason in reasons)
+        else:
+            passing_sources += 1
+
+    if report.get("baseline_error") or baseline_error:
+        overall_reasons.append(str(report.get("baseline_error") or baseline_error))
+    if (
+        not verify_enabled
+        and int((report.get("totals") or {}).get("net_new", 0) or 0) < 5
+    ):
+        overall_reasons.append("cheap audit net-new nodes are below 5")
+    batch_diversity_passed = False
+    if verify_enabled and require_batch_diversity:
+        batch_diversity_reasons: list[str] = []
+        if len(net_new_tier2_protocols) < 2:
+            batch_diversity_reasons.append(
+                "net-new Tier-2 batch covers fewer than two protocols"
+            )
+        diversity_protocols = {"hysteria2", "tuic", "juicity", "ssr"}
+        if not net_new_tier2_protocols.intersection(diversity_protocols):
+            batch_diversity_reasons.append(
+                "net-new Tier-2 batch lacks hysteria2, tuic, juicity, or ssr"
+            )
+        batch_diversity_passed = not batch_diversity_reasons
+        overall_reasons.extend(batch_diversity_reasons)
+
+    results = report.get("results") or []
+    report["gate"] = {
+        "passed": bool(results) and not overall_reasons,
+        "reasons": overall_reasons,
+        "passing_sources": passing_sources,
+        "required_successful_runs": required_runs,
+        "minimum_window_hours": minimum_window_hours,
+        "tier2_protocols": sorted(net_new_tier2_protocols),
+        "net_new_tier2_protocols": sorted(net_new_tier2_protocols),
+        "batch_diversity_required": require_batch_diversity,
+        "batch_diversity_passed": batch_diversity_passed,
+    }
+    report["gate_config"] = {
+        "http_status": "2xx",
+        "max_unsupported_ratio": max_unsupported_ratio,
+        "max_overlap_ratio": max_overlap_ratio,
+        "max_private_reserved_ratio": 0.0 if reject_private_reserved else 1.0,
+        "mirror_jaccard_minimum": mirror_threshold,
+        "tier1_alive": "max(5, ceil(10% * sampled_unique))",
+        "tier2_passed": "max(5, ceil(5% * sampled_unique))",
+        "net_new_tier2": 5,
+        "batch_diversity_required": require_batch_diversity,
+    }
+    report["gate"]["config"] = report["gate_config"]
+    report["gate_passed"] = report["gate"]["passed"]
+    report["gate_reasons"] = overall_reasons
+    report["success"] = report["gate"]["passed"]
+    if isinstance(report.get("totals"), dict):
+        report["totals"]["success"] = report["success"]
+        report["totals"]["ok"] = report["success"]
+    return report
+
+
+def _candidate_set_fingerprint(
+    records: list[dict], settings: dict | None = None
+) -> str:
+    """Bind canary history to one immutable candidate/sampling projection."""
+
+    projection = []
+    for record in records:
+        projection.append(
+            {
+                "id": str(record.get("id") or ""),
+                "canonical": source_audit.canonicalize_url(
+                    str(record.get("canonical") or record.get("url") or "")
+                ),
+                "format": str(record.get("format") or ""),
+                "candidate_round": record.get("candidate_round"),
+                "tier": record.get("tier"),
+                "enabled": record.get("enabled"),
+                "endpoint_policy": str(record.get("endpoint_policy") or ""),
+                "max_nodes": record.get("max_nodes"),
+                "sample_strategy": str(record.get("sample_strategy") or ""),
+                "mirrors": sorted(
+                    {
+                        source_audit.canonicalize_url(str(value))
+                        for value in (record.get("mirrors") or [])
+                    }
+                ),
+            }
+        )
+    payload = json.dumps(
+        {
+            "candidates": sorted(projection, key=lambda value: value["id"]),
+            "settings": settings or {},
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _history_timestamp(value: object) -> float | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
+
+
+def _candidate_history_projection(
+    report: dict,
+    result: dict,
+    *,
+    candidate_config_sha256: str,
+) -> dict:
+    """Bind one canary run to its baseline and sampled upstream content."""
+
+    baseline = report.get("baseline") or {}
+    totals = report.get("totals") or {}
+    baseline_sha256 = baseline.get("sha256")
+    if baseline_sha256 is None:
+        baseline_sha256 = totals.get("baseline_sha256")
+    baseline_count = baseline.get("nodes")
+    if baseline_count is None:
+        baseline_count = totals.get("baseline_count")
+
+    sample_projection = {
+        "semantic_sha256": result.get("sha256") or result.get("content_hash"),
+        "node_set_sha256": result.get("node_set_sha256"),
+        "unique": result.get("unique"),
+        "unique_before_cap": result.get("unique_before_cap"),
+        "sampled_out": result.get("sampled_out"),
+        "capped": result.get("capped"),
+    }
+    sample_projection_sha256 = hashlib.sha256(
+        json.dumps(
+            sample_projection,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    return {
+        "candidate_config_sha256": candidate_config_sha256,
+        "baseline_sha256": baseline_sha256,
+        "baseline_count": baseline_count,
+        "body_sha256": result.get("body_sha256"),
+        "content_sha256": result.get("content_sha256"),
+        "node_set_sha256": result.get("node_set_sha256"),
+        "sample_projection_sha256": sample_projection_sha256,
+        "sample_projection": sample_projection,
+    }
+
+
+def _projection_sha256(projection: dict) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            projection,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _update_canary_history(
+    report: dict,
+    *,
+    history_path: Path,
+    candidate_set_sha256: str,
+    candidate_fingerprints: dict[str, str] | None = None,
+    candidate_diversity_requirements: dict[str, bool] | None = None,
+    required_runs: int = DEFAULT_CANARY_REQUIRED_RUNS,
+    minimum_window_hours: int = DEFAULT_CANARY_WINDOW_HOURS,
+) -> dict:
+    """Persist a compact run summary and calculate promotion readiness."""
+
+    required_runs = max(1, int(required_runs))
+    minimum_window_hours = max(0, int(minimum_window_hours))
+    previous = source_audit.load_history(history_path)
+    run_id = str(report.get("run_id") or uuid.uuid4().hex)
+    generated_at = str(
+        report.get("generated_at")
+        or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    )
+    candidate_summaries: dict[str, dict] = {}
+    candidate_projections: dict[str, dict] = {}
+    history_candidate_fingerprints: dict[str, str] = {}
+    for result in report.get("results") or []:
+        source_id = str(result.get("id") or "")
+        verification = result.get("verification") or {}
+        candidate_config_sha256 = (candidate_fingerprints or {}).get(
+            source_id
+        ) or candidate_set_sha256
+        projection = _candidate_history_projection(
+            report,
+            result,
+            candidate_config_sha256=candidate_config_sha256,
+        )
+        history_fingerprint = _projection_sha256(projection)
+        candidate_projections[source_id] = projection
+        history_candidate_fingerprints[source_id] = history_fingerprint
+        candidate_summaries[source_id] = {
+            "passed": (result.get("gate") or {}).get("passed") is True,
+            "tier1_alive": int(verification.get("tier1_alive", 0) or 0),
+            "tier2_passed": int(verification.get("tier2_passed", 0) or 0),
+            "net_new_tier2": int(verification.get("net_new_tier2", 0) or 0),
+            "history_fingerprint": history_fingerprint,
+        }
+
+    entry = {
+        "version": CANARY_HISTORY_SCHEMA_VERSION,
+        "run_id": run_id,
+        "generated_at": generated_at,
+        "baseline_sha256": (report.get("baseline") or {}).get("sha256"),
+        "baseline_count": (report.get("baseline") or {}).get("nodes"),
+        "gate_config_sha256": hashlib.sha256(
+            json.dumps(
+                report.get("gate_config") or {},
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest(),
+        "candidate_set_sha256": candidate_set_sha256,
+        # Preserve the original configuration-only field for existing readers;
+        # content-bound evidence is kept separately so legacy entries cannot
+        # attest a newly fetched candidate payload.
+        "candidate_fingerprints": dict(candidate_fingerprints or {}),
+        "candidate_history_fingerprints": history_candidate_fingerprints,
+        "candidate_projections": candidate_projections,
+        "verify_enabled": report.get("verify_enabled") is True,
+        "run_gate_passed": (report.get("gate") or {}).get("passed") is True,
+        "batch_diversity_passed": (report.get("gate") or {}).get(
+            "batch_diversity_passed"
+        )
+        is True,
+        "net_new_tier2_protocols": list(
+            (report.get("gate") or {}).get("net_new_tier2_protocols") or []
+        ),
+        "candidates": candidate_summaries,
+    }
+    history = [item for item in previous if str(item.get("run_id") or "") != run_id]
+    history.append(entry)
+    history.sort(
+        key=lambda item: (
+            _history_timestamp(item.get("generated_at")) or 0.0,
+            str(item.get("run_id") or ""),
+        )
+    )
+    history_error: str | None = None
+    try:
+        source_audit.write_history(history_path, history)
+    except Exception as exc:
+        history_error = f"{type(exc).__name__}: {exc}"
+
+    promotion_reasons: list[str] = []
+    ready_sources = 0
+    for result in report.get("results") or []:
+        source_id = str(result.get("id") or "")
+        # Promotion history is tracked per candidate.  A failed verified run
+        # for this candidate breaks its consecutive streak, while an unrelated
+        # candidate in the same round may continue accumulating evidence.
+        successful_runs: dict[str, float] = {}
+        batch_diversity_evidence = False
+        requires_batch_diversity = bool(
+            (candidate_diversity_requirements or {}).get(source_id, False)
+        )
+        current_candidate_fingerprint = history_candidate_fingerprints.get(source_id)
+        for item in history:
+            if item.get("verify_enabled") is not True:
+                continue
+            item_candidates = item.get("candidates") or {}
+            if source_id not in item_candidates:
+                continue
+            item_candidate_fingerprint = (
+                item.get("candidate_history_fingerprints") or {}
+            ).get(source_id)
+            if current_candidate_fingerprint:
+                same_projection = (
+                    item_candidate_fingerprint == current_candidate_fingerprint
+                )
+            else:
+                # Backward-compatible path for callers that predate the
+                # per-candidate projection field.
+                same_projection = (
+                    item.get("candidate_set_sha256") == candidate_set_sha256
+                )
+            if not same_projection:
+                # A verified run under different baseline/content/config starts
+                # a new streak even if the source later reverts to old bytes.
+                successful_runs.clear()
+                batch_diversity_evidence = False
+                continue
+            candidate_summary = item_candidates.get(source_id) or {}
+            if candidate_summary.get("passed") is not True:
+                successful_runs.clear()
+                batch_diversity_evidence = False
+                continue
+            if item.get("batch_diversity_passed") is True:
+                batch_diversity_evidence = True
+            timestamp = _history_timestamp(item.get("generated_at"))
+            if timestamp is not None:
+                successful_runs[str(item.get("run_id") or timestamp)] = timestamp
+        timestamps = sorted(successful_runs.values())
+        span_hours = (
+            (timestamps[-1] - timestamps[0]) / 3600.0 if len(timestamps) >= 2 else 0.0
+        )
+        ready = (
+            len(timestamps) >= required_runs
+            and span_hours >= minimum_window_hours
+            and (result.get("gate") or {}).get("passed") is True
+            and (not requires_batch_diversity or batch_diversity_evidence)
+        )
+        result["promotion_history"] = {
+            "ready": ready,
+            "successful_runs": len(timestamps),
+            "required_successful_runs": required_runs,
+            "window_hours": round(span_hours, 3),
+            "minimum_window_hours": minimum_window_hours,
+            "batch_diversity_required": requires_batch_diversity,
+            "batch_diversity_evidence": batch_diversity_evidence,
+            "first_success_at": (
+                datetime.fromtimestamp(timestamps[0], timezone.utc).strftime(
+                    "%Y-%m-%dT%H:%M:%SZ"
+                )
+                if timestamps
+                else None
+            ),
+            "latest_success_at": (
+                datetime.fromtimestamp(timestamps[-1], timezone.utc).strftime(
+                    "%Y-%m-%dT%H:%M:%SZ"
+                )
+                if timestamps
+                else None
+            ),
+        }
+        if ready:
+            ready_sources += 1
+        else:
+            promotion_reasons.append(
+                f"{source_id}: requires {required_runs} successful verified runs "
+                f"across {minimum_window_hours}h (has {len(timestamps)} across "
+                f"{span_hours:.1f}h)"
+            )
+
+    run_gate = dict(report.get("gate") or {})
+    if run_gate.get("passed") is not True:
+        promotion_reasons.extend(
+            str(reason) for reason in run_gate.get("reasons") or []
+        )
+    if history_error:
+        promotion_reasons.append(f"canary history write failed: {history_error}")
+    result_count = len(report.get("results") or [])
+    promotion_ready = (
+        result_count > 0
+        and ready_sources == result_count
+        and run_gate.get("passed") is True
+        and history_error is None
+    )
+    report["run_gate"] = run_gate
+    report["promotion_gate"] = {
+        "passed": promotion_ready,
+        "reasons": promotion_reasons,
+        "ready_sources": ready_sources,
+        "total_sources": result_count,
+        "required_successful_runs": required_runs,
+        "minimum_window_hours": minimum_window_hours,
+    }
+    report["promotion_ready"] = promotion_ready
+    report.setdefault("gate", {})["promotion_ready"] = promotion_ready
+    report["history"] = {
+        "path": str(history_path),
+        "entries": len(history),
+        "candidate_set_sha256": candidate_set_sha256,
+        "error": history_error,
+    }
+    if history_error:
+        report["success"] = False
+        report["ok"] = False
+        report["gate_passed"] = False
+        if isinstance(report.get("gate"), dict):
+            report["gate"]["passed"] = False
+            report["gate"]["reasons"] = (
+                list(report["gate"].get("reasons") or []) + promotion_reasons
+            )
+    return report
+
+
+@app.command(name="audit-sources")
+def audit_sources_cmd(
+    registry: Path | None = typer.Option(
+        None,
+        "--registry",
+        help="Candidate JSONL registry; defaults to config.canary.registry_path.",
+    ),
+    baseline: Path | None = typer.Option(
+        None,
+        "--baseline",
+        help="Verified live JSONL or published Clash/sing-box baseline.",
+    ),
+    output: Path | None = typer.Option(
+        None,
+        "--output",
+        help="Atomic JSON audit report destination.",
+    ),
+    history: Path | None = typer.Option(
+        None,
+        "--history",
+        help="Compact JSONL history used for the three-run promotion gate.",
+    ),
+    candidate: list[str] | None = typer.Option(
+        None,
+        "--candidate",
+        help="Candidate id to audit; repeat the option to select multiple ids.",
+    ),
+    round_number: int = typer.Option(
+        1,
+        "--round",
+        min=1,
+        help="Candidate round selected when --candidate is omitted.",
+    ),
+    verify: bool = typer.Option(
+        False,
+        "--verify/--no-verify",
+        help="Run the production two-tier verifier in an isolated temp snapshot.",
+    ),
+    max_nodes: int = typer.Option(
+        0,
+        "--max-nodes",
+        min=0,
+        help="Optional per-source cap that can only reduce registry limits.",
+    ),
+    max_runtime: int = typer.Option(
+        0,
+        "--max-runtime",
+        min=0,
+        help="Per-source verifier wall-clock cap; 0 uses the canary config.",
+    ),
+    require_promotion_ready: bool = typer.Option(
+        False,
+        "--require-promotion-ready/--no-require-promotion-ready",
+        help="Fail unless the three-run/48-hour promotion history gate is met.",
+    ),
+) -> None:
+    """Audit disabled source candidates without touching production snapshots."""
+
+    console.rule("[bold cyan]audit sources")
+    quality = _load_quality()
+    canary_config = quality.get("canary") or {}
+    registry_path = _audit_path(
+        registry,
+        Path(str(canary_config.get("registry_path") or "state/candidates.jsonl")),
+    )
+    baseline_path = _audit_path(baseline, LIVE)
+    output_path = _audit_path(output, STATE / "source-audit.json")
+    history_path = _audit_path(
+        history,
+        Path(str(canary_config.get("history_path") or DEFAULT_CANARY_HISTORY)),
+    )
+
+    try:
+        source_audit.validate_artifact_paths(
+            registry_path=registry_path,
+            baseline_path=baseline_path,
+            output_path=output_path,
+            history_path=history_path,
+        )
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1)
+
+    records = source_audit.load_candidates(registry_path)
+    selected_ids = list(candidate or [])
+    if not selected_ids:
+        selected_ids = [
+            str(record["id"])
+            for record in records
+            if str(record.get("candidate_round", "")) == str(round_number)
+        ]
+    records_by_id = {str(record.get("id")): record for record in records}
+    missing_ids = sorted(set(selected_ids) - set(records_by_id))
+    selected_records = [
+        records_by_id[source_id]
+        for source_id in selected_ids
+        if source_id in records_by_id
+    ]
+
+    reasons: list[str] = []
+    try:
+        canary_total_cap = int(
+            quality.get(
+                "canary_max_total_nodes",
+                canary_config.get("max_total_nodes", DEFAULT_CANARY_MAX_TOTAL_NODES),
+            )
+        )
+        per_source_cap = int(canary_config.get("max_nodes_per_source", 250))
+        required_runs = int(
+            canary_config.get("required_successful_runs", DEFAULT_CANARY_REQUIRED_RUNS)
+        )
+        minimum_window_hours = int(
+            canary_config.get("minimum_window_hours", DEFAULT_CANARY_WINDOW_HOURS)
+        )
+        if canary_total_cap < 1 or per_source_cap < 1 or required_runs < 1:
+            raise ValueError("caps and required_successful_runs must be positive")
+        if minimum_window_hours < 0:
+            raise ValueError("minimum_window_hours must be non-negative")
+        if str(canary_config.get("sample_strategy", "stable_hash")) != "stable_hash":
+            raise ValueError("sample_strategy must be stable_hash")
+        if (
+            str(canary_config.get("sample_seed", STABLE_SAMPLE_SEED))
+            != STABLE_SAMPLE_SEED
+        ):
+            raise ValueError("sample_seed does not match the parser sampling version")
+        response_cap = int(
+            canary_config.get("response_cap_bytes", source_audit.MAX_RESPONSE_BYTES)
+        )
+        fetch_timeout = float(canary_config.get("fetch_timeout_seconds", 20))
+        mirror_threshold = float(canary_config.get("mirror_jaccard_minimum", 0.80))
+        unsupported_limit = float(canary_config.get("max_unsupported_ratio", 0.20))
+        overlap_limit = float(canary_config.get("max_overlap_ratio", 0.90))
+        reject_private_reserved = canary_config.get("reject_private_reserved", True)
+        configured_max_runtime = int(
+            canary_config.get("candidate_max_runtime_seconds", 900)
+        )
+        if not isinstance(reject_private_reserved, bool):
+            raise ValueError("reject_private_reserved must be boolean")
+        if configured_max_runtime < 0:
+            raise ValueError("candidate_max_runtime_seconds must be non-negative")
+        if not 1 <= response_cap <= source_audit.MAX_RESPONSE_BYTES:
+            raise ValueError("response_cap_bytes must be within 1..25 MiB")
+        if fetch_timeout <= 0:
+            raise ValueError("fetch_timeout_seconds must be positive")
+        if not all(
+            0 <= value <= 1
+            for value in (mirror_threshold, unsupported_limit, overlap_limit)
+        ):
+            raise ValueError("ratio thresholds must be between 0 and 1")
+    except (TypeError, ValueError) as exc:
+        canary_total_cap = DEFAULT_CANARY_MAX_TOTAL_NODES
+        per_source_cap = 250
+        required_runs = DEFAULT_CANARY_REQUIRED_RUNS
+        minimum_window_hours = DEFAULT_CANARY_WINDOW_HOURS
+        response_cap = source_audit.MAX_RESPONSE_BYTES
+        fetch_timeout = 20.0
+        mirror_threshold = 0.80
+        unsupported_limit = 0.20
+        overlap_limit = 0.90
+        reject_private_reserved = True
+        configured_max_runtime = 900
+        reasons.append(f"invalid canary quality configuration: {exc}")
+
+    effective_max_runtime = max_runtime or configured_max_runtime
+
+    effective_caps: dict[str, int] = {}
+    for record in selected_records:
+        source_id = str(record.get("id") or "")
+        try:
+            configured_value = record.get("max_nodes")
+            if configured_value is None:
+                configured_cap = per_source_cap
+            elif isinstance(configured_value, bool) or not isinstance(
+                configured_value, int
+            ):
+                raise ValueError("max_nodes must be an integer or null")
+            else:
+                configured_cap = configured_value
+            if configured_cap < 1:
+                raise ValueError("max_nodes must be positive")
+            effective_caps[source_id] = min(
+                configured_cap,
+                per_source_cap,
+                max_nodes or configured_cap,
+            )
+        except (TypeError, ValueError) as exc:
+            reasons.append(f"{source_id}: invalid max_nodes: {exc}")
+        if record.get("enabled") is not False:
+            reasons.append(f"{source_id}: candidate must remain disabled")
+        if record.get("tier") != 3:
+            reasons.append(f"{source_id}: candidate tier must be 3")
+        if record.get("sample_strategy") != "stable_hash":
+            reasons.append(f"{source_id}: sample_strategy must be stable_hash")
+        if not record.get("discovered_at"):
+            reasons.append(f"{source_id}: discovered_at is required")
+    planned_nodes = sum(effective_caps.values())
+    if (
+        missing_ids
+        or not selected_records
+        or planned_nodes > canary_total_cap
+        or reasons
+    ):
+        if missing_ids:
+            reasons.append("unknown candidate ids: " + ", ".join(missing_ids))
+        if not selected_records:
+            reasons.append(f"no candidates found for round {round_number}")
+        if planned_nodes > canary_total_cap:
+            reasons.append(
+                f"planned candidate nodes {planned_nodes} exceed canary cap {canary_total_cap}"
+            )
+        summary = {
+            "version": 1,
+            "success": False,
+            "results": [],
+            "totals": {
+                "candidates": len(selected_records),
+                "planned_nodes": planned_nodes,
+            },
+            "gate": {"passed": False, "reasons": reasons},
+            "error": "; ".join(reasons),
+        }
+        source_audit.write_report(summary, output_path)
+        _print_table("source audit summary", summary["totals"] | {"success": False})
+        _ensure_success("audit-sources", summary)
+        return
+
+    timeout = fetch_timeout
+    max_bytes = response_cap
+
+    def verifier_callback(nodes: list[ProxyNode], result: dict) -> dict:
+        cheap_reasons: list[str] = []
+        if result.get("status") != "ok":
+            cheap_reasons.append(f"audit status is {result.get('status')}")
+        http_status = result.get("http_status")
+        if (
+            isinstance(http_status, bool)
+            or not isinstance(http_status, int)
+            or not 200 <= http_status < 300
+        ):
+            cheap_reasons.append(f"fetch status {http_status!r} is not HTTP 2xx")
+        unsupported_ratio = result.get("unsupported_ratio")
+        if (
+            isinstance(unsupported_ratio, (int, float))
+            and unsupported_ratio > unsupported_limit
+        ):
+            cheap_reasons.append(
+                f"unsupported/invalid ratio {unsupported_ratio:.3f} exceeds "
+                f"{unsupported_limit:.2f}"
+            )
+        if (
+            reject_private_reserved
+            and int(result.get("private_reserved_count", 0) or 0) > 0
+        ):
+            cheap_reasons.append("source contains private or reserved endpoints")
+        if float(result.get("overlap_ratio", 0.0) or 0.0) > overlap_limit:
+            cheap_reasons.append(f"semantic overlap exceeds {overlap_limit:.2f}")
+        if cheap_reasons:
+            return {
+                "completed": True,
+                "success": False,
+                "skipped": True,
+                "tier1_tested": 0,
+                "tier1_alive": 0,
+                "tier2_tested": 0,
+                "tier2_passed": 0,
+                "error": "verification skipped after cheap gate: "
+                + "; ".join(cheap_reasons),
+            }
+        eligible = [
+            node for node in nodes if not source_audit._host_flags(node.host)[0]
+        ]
+        summary = _verify_candidate_isolated(
+            eligible, max_runtime=effective_max_runtime or None
+        )
+        summary["private_reserved_excluded"] = len(nodes) - len(eligible)
+        return summary
+
+    report = source_audit.run(
+        registry_path=registry_path,
+        baseline_path=baseline_path,
+        output_path=output_path,
+        candidate_ids=selected_ids,
+        verify=verify,
+        max_nodes=max_nodes or None,
+        max_nodes_per_source=per_source_cap,
+        mirror_jaccard=True,
+        verifier=verifier_callback if verify else None,
+        timeout=timeout,
+        max_bytes=max_bytes,
+        exclude_private=True,
+        gate_config={
+            "min_net_new": 5,
+            "max_overlap_ratio": overlap_limit,
+            "max_private_reserved_ratio": 0.0 if reject_private_reserved else 1.0,
+            "require_baseline": True,
+        },
+    )
+    report = _apply_canary_gates(
+        report,
+        verify_enabled=verify,
+        baseline_path=baseline_path,
+        mirror_threshold=mirror_threshold,
+        max_unsupported_ratio=unsupported_limit,
+        max_overlap_ratio=overlap_limit,
+        reject_private_reserved=reject_private_reserved,
+        required_runs=required_runs,
+        minimum_window_hours=minimum_window_hours,
+        require_batch_diversity=(
+            (round_number == 1 and not candidate) or len(selected_ids) > 1
+        ),
+    )
+    fingerprint_records = [
+        dict(record, max_nodes=effective_caps[str(record.get("id") or "")])
+        for record in selected_records
+    ]
+    fingerprint_settings = {
+        "round_number": round_number,
+        "verify_enabled": bool(verify),
+        "primary_only": bool(canary_config.get("primary_only", True)),
+        "required_successful_runs": required_runs,
+        "minimum_window_hours": minimum_window_hours,
+        "mirror_jaccard_minimum": mirror_threshold,
+        "max_unsupported_ratio": unsupported_limit,
+        "canary_max_total_nodes": canary_total_cap,
+        "sample_seed": STABLE_SAMPLE_SEED,
+        "semantic_key_version": SEMANTIC_KEY_VERSION,
+        "source_audit_schema_version": source_audit.AUDIT_SCHEMA_VERSION,
+        "canary_history_schema_version": CANARY_HISTORY_SCHEMA_VERSION,
+        "response_cap_bytes": response_cap,
+        "fetch_timeout_seconds": fetch_timeout,
+        "candidate_max_runtime_seconds": effective_max_runtime or None,
+        "verifier_contract_version": VERIFY_PROGRESS_SCHEMA_VERSION,
+        "canary_gate_version": CANARY_GATE_SCHEMA_VERSION,
+        "canary_gate_contract": {
+            "max_overlap_ratio": overlap_limit,
+            "max_private_reserved_ratio": 0.0 if reject_private_reserved else 1.0,
+            "tier1_minimum": "max(5,ceil(0.10*n))",
+            "tier2_minimum": "max(5,ceil(0.05*n))",
+            "net_new_tier2_minimum": 5,
+            "diversity_protocols": ["hysteria2", "juicity", "ssr", "tuic"],
+            "mirror_requires_primary": True,
+            "reject_private_reserved": reject_private_reserved,
+        },
+        "clash_speedtest_version": os.environ.get("CLASH_SPEEDTEST_VERSION", "unknown"),
+        "verifier_quality": {
+            "max_latency_ms": quality.get("max_latency_ms", 1000),
+            "min_download_speed_mbps": quality.get("min_download_speed_mbps", 5),
+            "download_size_bytes": quality.get("download_size_bytes", 10485760),
+            "probe_timeout_seconds": quality.get("probe_timeout_seconds", 5),
+            "verifier_process_timeout_seconds": quality.get(
+                "verifier_process_timeout_seconds", 30
+            ),
+        },
+    }
+    candidate_fingerprint = _candidate_set_fingerprint(
+        fingerprint_records,
+        fingerprint_settings,
+    )
+    candidate_fingerprints = {
+        str(record.get("id") or ""): _candidate_set_fingerprint(
+            [record], fingerprint_settings
+        )
+        for record in fingerprint_records
+    }
+    candidate_diversity_requirements = {
+        str(record.get("id") or ""): record.get("candidate_round") == 1
+        for record in fingerprint_records
+    }
+    report["canary"] = {
+        "round": round_number,
+        "candidate_ids": selected_ids,
+        "candidate_set_sha256": candidate_fingerprint,
+        "planned_nodes": planned_nodes,
+        "canary_max_total_nodes": canary_total_cap,
+        "max_nodes_per_source": per_source_cap,
+        "sample_strategy": "stable_hash",
+        "sample_seed": STABLE_SAMPLE_SEED,
+        "primary_only": bool(canary_config.get("primary_only", True)),
+        "batch_diversity_required": report["gate"].get(
+            "batch_diversity_required", False
+        ),
+        "max_runtime_seconds": effective_max_runtime or None,
+        "max_overlap_ratio": overlap_limit,
+        "reject_private_reserved": reject_private_reserved,
+        "response_cap_bytes": max_bytes,
+    }
+    report = _update_canary_history(
+        report,
+        history_path=history_path,
+        candidate_set_sha256=candidate_fingerprint,
+        candidate_fingerprints=candidate_fingerprints,
+        candidate_diversity_requirements=candidate_diversity_requirements,
+        required_runs=required_runs,
+        minimum_window_hours=minimum_window_hours,
+    )
+    if require_promotion_ready and not report.get("promotion_ready"):
+        promotion_reasons = list(
+            (report.get("promotion_gate") or {}).get("reasons") or []
+        )
+        report["success"] = False
+        report["ok"] = False
+        report["gate_passed"] = False
+        report["gate_reasons"] = (
+            list(report.get("gate_reasons") or []) + promotion_reasons
+        )
+        report["error"] = "; ".join(promotion_reasons) or "promotion gate is not ready"
+        if isinstance(report.get("gate"), dict):
+            report["gate"]["passed"] = False
+            report["gate"]["reasons"] = (
+                list(report["gate"].get("reasons") or []) + promotion_reasons
+            )
+        if isinstance(report.get("totals"), dict):
+            report["totals"]["success"] = False
+            report["totals"]["ok"] = False
+    source_audit.write_report(report, output_path)
+    totals = report.get("totals") or {}
+    summary = {
+        "candidates": totals.get("candidates", 0),
+        "fetched": totals.get("fetched", 0),
+        "unique": totals.get("unique", 0),
+        "net_new": totals.get("net_new", 0),
+        "gate_passed": report.get("gate_passed", False),
+        "promotion_ready": report.get("promotion_ready", False),
+        "require_promotion_ready": require_promotion_ready,
+        "history": report.get("history", {}).get("entries", 0),
+        "output": str(output_path),
+        "success": report.get("success", False),
+    }
+    _print_table("source audit summary", summary)
+    if not report.get("success"):
+        reasons = list(report.get("gate_reasons") or [])
+        history_error = (report.get("history") or {}).get("error")
+        if history_error:
+            reasons.append(f"canary history: {history_error}")
+        report["error"] = "; ".join(reasons) or "source audit gate failed"
+        source_audit.write_report(report, output_path)
+    _ensure_success("audit-sources", report)
+
+
 @app.command()
 def fetch() -> None:
     """Fetch enabled sources into state/staging.jsonl."""
@@ -1419,6 +2677,62 @@ def github_dork_cmd() -> None:
     github_dork._update_last_run(summary)
     _print_table("github-dork summary", summary)
     _ensure_success("github-dork", summary)
+
+
+@app.command(name="gray-crawl")
+def gray_crawl_cmd() -> None:
+    """G1: discover panel leads and process explicitly approved registrations."""
+    console.rule("[bold cyan]gray-crawl (G1)")
+    summary = gray_sources.run()
+    _print_table("gray-crawl summary", summary)
+    _ensure_success("gray-crawl", summary)
+
+
+@app.command(name="scan-targets")
+def scan_targets_cmd(
+    shards: Path = typer.Option(
+        scanner.SHARDS_FILE,
+        "--shards",
+        help="File containing one explicitly approved CIDR or IP per line.",
+    ),
+    ports: str | None = typer.Option(
+        None,
+        "--ports",
+        help="Comma-separated TCP ports; defaults to config/gray_sources.yaml.",
+    ),
+    rate: int | None = typer.Option(
+        None,
+        "--rate",
+        min=1,
+        help="Override the configured masscan packet rate.",
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Run despite scan.enabled=false; an explicit target file is still required.",
+    ),
+) -> None:
+    """G2: scan explicitly listed targets and write quarantined leads."""
+    parsed_ports: list[int] | None = None
+    if ports:
+        try:
+            parsed_ports = sorted(
+                {int(value.strip()) for value in ports.split(",") if value.strip()}
+            )
+        except ValueError as exc:
+            raise typer.BadParameter("ports must be comma-separated integers") from exc
+        if not parsed_ports or any(port < 1 or port > 65535 for port in parsed_ports):
+            raise typer.BadParameter("ports must be between 1 and 65535")
+
+    console.rule("[bold cyan]scan-targets (G2)")
+    summary = scanner.run(
+        shards_file=shards,
+        ports=parsed_ports,
+        rate=rate,
+        enabled_override=True if force else None,
+    )
+    _print_table("scan-targets summary", summary)
+    _ensure_success("scan-targets", summary)
 
 
 @app.command(name="publish-resin")

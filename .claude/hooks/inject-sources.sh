@@ -4,7 +4,7 @@ set -euo pipefail
 # SessionStart hook: inject source count + last-run status into session context.
 # Uses python (portable) instead of jq — Windows machines often lack jq.
 
-ROOT="${CLAUDE_PROJECT_DIR:-C:\\Users\\win10\\Documents\\Free-Proxy}"
+ROOT="${CLAUDE_PROJECT_DIR:-$(pwd)}"
 SOURCES="${ROOT}/state/sources.json"
 LASTRUN="${ROOT}/state/last-run.json"
 

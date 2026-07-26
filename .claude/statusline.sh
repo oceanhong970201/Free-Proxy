@@ -4,7 +4,7 @@ set -euo pipefail
 # statusline: live node count | source count | last-run ts
 # Uses python (portable) instead of jq — Windows machines often lack jq.
 
-ROOT="${CLAUDE_PROJECT_DIR:-C:\\Users\\win10\\Documents\\Free-Proxy}"
+ROOT="${CLAUDE_PROJECT_DIR:-$(pwd)}"
 LIVE="${ROOT}/state/live.jsonl"
 SOURCES="${ROOT}/state/sources.json"
 LASTRUN="${ROOT}/state/last-run.json"

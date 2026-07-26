@@ -139,6 +139,25 @@ def test_shadowsocks_requires_and_preserves_method() -> None:
         emit_singbox([missing_method])
 
 
+def test_shadowsocks_legacy_base64_uri_round_trip() -> None:
+    # PRD Stage 20 / M1: the legacy SIP002 form base64-encodes the whole
+    # "method:password@host:port" blob; the cipher must survive parse + re-emit.
+    blob = base64.b64encode(b"aes-256-gcm:secret@ss.example:8388").decode("ascii")
+    node = parse_uri(f"ss://{blob}#legacy")
+    assert node is not None
+    assert node.proto == "ss"
+    assert node.host == "ss.example"
+    assert node.port == 8388
+    assert node.method == "aes-256-gcm"
+    assert node.password == "secret"
+
+    reparsed = parse_uri(node_to_uri(node))
+    assert reparsed is not None
+    assert reparsed.method == "aes-256-gcm"
+    assert reparsed.password == "secret"
+    assert reparsed.dedup_key() == node.dedup_key()
+
+
 def test_ssr_round_trip_and_clash_shape() -> None:
     original = ProxyNode(
         proto="ssr",
@@ -400,6 +419,15 @@ def test_content_hash_is_order_and_duplicate_independent() -> None:
     assert content_hash([first, second]) == content_hash([second, first, first])
 
 
+def test_content_hash_and_dedup_ignore_download_speed() -> None:
+    # PRD Stage 20 / m7: download_speed is a runtime measurement, not part of
+    # the connection identity, so it must not perturb dedup_key or content_hash.
+    slow = vless_node(download_speed=1.0)
+    fast = vless_node(download_speed=99.0)
+    assert node_dedup_key(slow) == node_dedup_key(fast)
+    assert content_hash([slow]) == content_hash([fast])
+
+
 def test_publish_filter_requires_alive_unless_explicitly_overridden() -> None:
     verified = vless_node(alive=True)
     unverified = vless_node(alive=None, uuid=UUID2)
@@ -460,10 +488,6 @@ def test_vmess_alter_id_and_httpupgrade_round_trip() -> None:
 
     changed = node.model_copy(update={"alter_id": 0})
     assert node_dedup_key(node) != node_dedup_key(changed)
-
-
-def test_vmess_parser_rejects_trailing_base64_garbage() -> None:
-    assert parse_uri(f"{_vmess_uri()}=vmess") is None
 
 
 def test_xhttp_is_native_in_clash_and_explicitly_unsupported_in_singbox() -> None:

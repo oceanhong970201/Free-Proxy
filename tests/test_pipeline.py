@@ -442,6 +442,7 @@ def test_vpnsuper_missing_handoff_retains_previous_staging(monkeypatch, tmp_path
             "url": "https://vpn.invalid",
             "format": "vpnsuper",
             "enabled": True,
+            "last_count": 99,
         },
         {
             "id": "http",
@@ -473,6 +474,7 @@ def test_vpnsuper_missing_handoff_retains_previous_staging(monkeypatch, tmp_path
     assert summary["total"] == 2
     assert summary["failed_sources"] == ["vpn"]
     assert staging.read_text(encoding="utf-8") == "OLD"
+    assert sources[0]["last_count"] == 99
 
 
 def test_emit_rejects_malformed_live_and_retains_outputs(monkeypatch, tmp_path):

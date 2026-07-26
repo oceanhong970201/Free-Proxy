@@ -193,7 +193,10 @@ async def fetch_all() -> dict:
             except (TypeError, ValueError):
                 uris = 0
             s["last_fetch"] = now
-            s["last_count"] = uris
+            # ``last_count`` is a post-parse, post-sampling metric.  The
+            # vpnsuper harvester only knows its raw URI count here; leave the
+            # previous value untouched until the normal parse transaction
+            # commits an accepted per-source count.
             if uris:
                 # harvest_async wrote state/vpnsuper_staging.jsonl as one
                 # {source_id, raw, fetched_at} line — read it back and merge

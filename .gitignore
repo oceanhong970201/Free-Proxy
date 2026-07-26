@@ -11,6 +11,8 @@ nodes.db-shm
 
 # staging / live line files (runtime artifacts)
 state/*.jsonl
+!state/candidates.jsonl
+state/source-audit.json
 state/run-*.log
 
 # output — keep generated subscriptions tracked, but allow local regen
@@ -61,3 +63,9 @@ state/_batch_t1.yaml
 state/_batch_t2.yaml
 state/verify-run.log
 state/verify-progress.json
+
+# G2 scanner scratch output
+state/_scan_targets.tmp
+state/scan.gnmap
+state/scan-discovery.xml
+state/scan.xml

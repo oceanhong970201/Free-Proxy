@@ -8,3 +8,26 @@ tier2_concurrent: 10           # isolated Tier-2 verifier processes run in paral
 download_size_bytes: 10485760  # 10 MB download per node for Tier 2 speed test
 probe_timeout_seconds: 5       # timeout passed to each verifier probe
 verifier_process_timeout_seconds: 30  # hard cap for one isolated process
+
+# Read-only candidate audit/canary budget. Candidate records stay disabled until
+# an explicit review promotes them into state/sources.json.
+max_total_nodes: 1800
+canary_max_total_nodes: 650
+canary:
+  registry_path: state/candidates.jsonl
+  max_nodes_per_source: 250
+  max_total_nodes: 650
+  sample_strategy: stable_hash
+  sample_seed: free-proxy-source-sampling-v1
+  history_path: state/source-canary-history.jsonl
+  required_successful_runs: 3
+  minimum_window_hours: 48
+  mirror_jaccard_minimum: 0.80
+  max_unsupported_ratio: 0.20
+  max_overlap_ratio: 0.90
+  reject_private_reserved: true
+  fetch_timeout_seconds: 20
+  response_cap_bytes: 26214400
+  candidate_max_runtime_seconds: 900
+  primary_only: true
+  allow_publish: false

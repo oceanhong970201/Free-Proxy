@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 SUPPORTED_PROTOCOLS = {
@@ -25,6 +27,10 @@ SUPPORTED_TRANSPORTS = {
     "httpupgrade",
 }
 TLS_DEFAULT_PROTOCOLS = {"trojan", "tuic", "hysteria2", "juicity"}
+# Versioned seed for deterministic per-source membership sampling. Changing it
+# is an intentional source-set migration and must reset canary history.
+STABLE_SAMPLE_SEED = "free-proxy-source-sampling-v1"
+SEMANTIC_KEY_VERSION = "proxy-node-semantic-v1"
 
 
 class ProxyNode(BaseModel):
@@ -279,12 +285,32 @@ def validate_proxy_node(node: ProxyNode) -> ProxyNode:
 
 
 class Source(BaseModel):
+    """One configured subscription source.
+
+    ``max_nodes`` limits the number of semantically unique nodes accepted from
+    this source during parsing.  ``sample_strategy`` is intentionally a
+    closed set for now: a stable hash ranking makes the selected subset
+    independent of upstream ordering while leaving room for a future strategy
+    to be added explicitly.
+    """
+
     id: str
     url: str
     mirrors: list[str] = Field(default_factory=list)
     format: str
     enabled: bool = True
     tier: int = 3
+    max_nodes: int | None = Field(default=None, ge=1)
+    sample_strategy: Literal["stable_hash"] = "stable_hash"
     last_fetch: int | None = None
     last_count: int | None = None
     status: str = "unknown"
+
+    @field_validator("max_nodes", mode="before")
+    @classmethod
+    def _validate_max_nodes_type(cls, value: object) -> object:
+        if value is not None and (
+            isinstance(value, bool) or not isinstance(value, int)
+        ):
+            raise ValueError("max_nodes must be an integer or null")
+        return value

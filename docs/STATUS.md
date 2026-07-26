@@ -39,6 +39,42 @@ state/sources.json
 - 只接受目前設定中已知且啟用的 `source_id`。
 - 節點在 parse 邊界驗證必要的 host、port 與協議憑證；不完整節點不會進入正常輸出。
 - SQLite 保存完整 `ProxyNode` JSON；同一 host/port 但不同憑證的節點仍是獨立設定。
+- 每個來源先做 semantic dedupe，再依 `sample_strategy: stable_hash` 做可重現的 hash sampling；`max_nodes: null` 代表不設來源上限，正整數代表 accepted 上限。
+- sampling 使用版本化固定 seed `free-proxy-source-sampling-v1`；seed 或 cap 變更會使 canary history 重新累積。
+- `config/quality.yaml` 的 production `max_total_nodes` 預設為 1800；`SOURCE_CANARY=1` 時使用 `canary_max_total_nodes`（650）。accepted、post-sampling 總數超過上限時 parse fail closed，不會靜默丟棄節點；`last_count` 只記 accepted count。
+
+### Candidate audit / canary
+
+候選來源不直接進入核心 fetch。使用 read-only `audit-sources` 產生
+`state/source-audit.json`：
+
+```powershell
+python src/aggregator/cli.py audit-sources --round 1 --no-verify --output state/source-audit.json
+python src/aggregator/cli.py audit-sources --round 2 --verify --max-runtime 300
+python src/aggregator/cli.py audit-sources --candidate CANDIDATE_ID --verify
+# CI can use the tracked published snapshot as a read-only baseline and retain history
+python src/aggregator/cli.py audit-sources --round 1 --verify --baseline output/singbox.json --history state/source-canary-history.jsonl
+# Promotion review can enforce the accumulated history gate explicitly
+python src/aggregator/cli.py audit-sources --candidate CANDIDATE_ID --verify --require-promotion-ready
+```
+
+`state/candidates.jsonl` 的 `candidate_round: 1` 是小型、低關聯候選；
+`candidate_round: 2` 是大型、輪替或 deferred 候選。兩者都必須保持
+`enabled: false`，並指定正整數 `max_nodes` 與 `sample_strategy: stable_hash`。
+Canary ceiling 是 650，audit 只能寫報告；它不呼叫 `publish`、不啟用來源，
+也不把候選節點合併到 production snapshots（`live.jsonl` 可僅作 read-only
+overlap baseline）。Output/history 路徑不得指向 baseline、來源 registry 或 `output/*`；
+cheap gate 已失敗的候選會記錄 verifier skipped，不再消耗 Tier-1/Tier-2 預算。
+
+Promotion gate 以每個候選的 projection fingerprint 累積三次成功 audit，且三次紀錄跨
+至少 48h（48 小時）；fingerprint 綁定 URL、round、stable-hash/caps、parser/semantic-key、
+verifier 版本、品質門檻、baseline semantic hash 與上游 body/node-set；history schema v2
+不沿用缺少內容投影的舊證據。任何一次該候選 verified failure、cap 超限或來源狀態改變都重新計算
+gate。Round 1 另須一次 batch evidence：net-new Tier-2 至少兩種 protocol family，並新增
+`hysteria2`、`tuic`、`juicity` 或 `ssr` 之一。parse、overlap、mirror eligibility（只有
+semantic Jaccard >= 0.80 的 mirror 可進 production）與要求的 Tier-1/Tier-2 gate 都要通過，
+才可人工一次複製一個候選到 `state/sources.json`，改為 `tier: 2` 並保留 `max_nodes`；
+啟用仍是另一個 reviewed change。
 
 ### Verify
 
@@ -154,6 +190,10 @@ python src/aggregator/cli.py verify
 python src/aggregator/cli.py emit
 python src/aggregator/cli.py publish --strict
 
+# 候選來源只做 read-only audit；不會發布或改寫 production snapshot
+python src/aggregator/cli.py audit-sources --round 1 --no-verify
+python src/aggregator/cli.py audit-sources --round 2 --verify --max-runtime 300
+
 # 或一次執行核心流程
 python src/aggregator/cli.py all
 ```
@@ -190,5 +230,6 @@ npm.cmd test
 - GitHub Actions 的 schedule 是 best-effort，cron 表達式不保證準點執行。
 - 不要手動編輯 `output/` 產物；應修正 parser/emitter 後重跑完整驗證。
 - 不要在未完成 verify 時發布，亦不要因新 snapshot 為空而覆蓋舊 snapshot。
+- 不要把 `state/source-audit.json` 或任何 canary 節點當作 publish 輸入；canary `never publish`、`never attach to production snapshots`，永不發布，也不接入 production snapshots。
 - protocol 與 transport 的支援度以 parser/emitter 測試為準；不得把未知 transport 靜默降級成 TCP。
 - 遠端 migration 與 Worker deploy 是獨立的營運動作；程式測試通過不等於遠端已更新。

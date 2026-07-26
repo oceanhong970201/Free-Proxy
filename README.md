@@ -35,6 +35,28 @@ python src\aggregator\cli.py publish --strict
 
 也可用 `python src\aggregator\cli.py all` 執行核心 `fetch -> parse -> verify -> emit -> publish --strict`。灰管道、recon、自有節點與 Resin 發布是獨立命令，不在 `all` 內。
 
+### G1/G2 灰管道
+
+G1 被動查詢面板指紋，只有 `config/gray_sources.yaml` 中明確列出的
+`panel_register.approved_targets` 才會進入註冊與訂閱擷取流程：
+
+```powershell
+python src\aggregator\cli.py gray-crawl
+```
+
+G2 只讀取 `tools/scan_shards.txt` 的明確 IP/CIDR allowlist。`scan.enabled`
+預設為 `false`；`--force` 只覆蓋這個開關，不會補出目標。`discovery_engine:auto`
+會優先使用 masscan，缺少時使用受限的 nmap connect scan：
+
+```powershell
+python src\aggregator\cli.py scan-targets --shards tools\scan_shards.txt
+python src\aggregator\cli.py scan-targets --force --ports 8388,443 --rate 1000
+```
+
+G2 的輸出是 `state/recon-leads.jsonl` 與隔離的候選記錄；`credential_guess`
+只表示由指紋推導出的候選，不表示已通過代理握手或可用性驗證。候選需經既有
+verify 流程與人工審核後才可進入正常輸出。
+
 ## 輸出
 
 | 檔案 | 格式 |

@@ -32,12 +32,20 @@ from urllib.parse import urljoin, urlsplit, urlunsplit
 import httpx
 import yaml
 
+try:
+    from dotenv import load_dotenv
+except ImportError:  # pragma: no cover - dependency is optional for direct import
+    load_dotenv = None
+
 ROOT = Path(__file__).resolve().parents[2]
+if load_dotenv is not None:
+    load_dotenv(ROOT / ".env", override=False)
 CONFIG_FILE = ROOT / "config" / "gray_sources.yaml"
 STATE_DIR = ROOT / "state"
 GRAY_NODES_FILE = STATE_DIR / "gray_nodes.jsonl"
 LAST_RUN_FILE = STATE_DIR / "last-run.json"
 PANEL_LEADS_FILE = STATE_DIR / "gray_panel_leads.jsonl"
+QUAKE_SEARCH_URL = "https://quake.360.net/api/v3/search/quake_service"
 
 # URI schemes we harvest from subscribe content.
 URI_RE = re.compile(
@@ -84,6 +92,29 @@ def _log(msg: str) -> None:
     print(f"[gray] {msg}", flush=True)
 
 
+def _clean_text(value: Any) -> str:
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _query_values(cfg: dict, key: str) -> list[str]:
+    values = cfg.get(key) or []
+    if not isinstance(values, (list, tuple)):
+        return []
+    return [
+        value.strip() for value in values if isinstance(value, str) and value.strip()
+    ]
+
+
+def _config_float(
+    cfg: dict, key: str, default: float, *, minimum: float = 0.0
+) -> float:
+    try:
+        value = float(cfg.get(key, default))
+    except (TypeError, ValueError):
+        return default
+    return value if value >= minimum else default
+
+
 # ---------------------------------------------------------------------------
 # Shodan client
 # ---------------------------------------------------------------------------
@@ -91,18 +122,20 @@ def _log(msg: str) -> None:
 
 async def _shodan_search(client: httpx.AsyncClient, cfg: dict) -> list[dict]:
     """Query Shodan for panel fingerprints. Returns list of {host, port, html}."""
-    key = cfg.get("shodan_api_key", "").strip()
+    key = _clean_text(cfg.get("shodan_api_key", ""))
     if not key:
         _log("SHODAN_API_KEY not set — skipping Shodan.")
         return []
-    queries = cfg.get("shodan_queries") or []
+    queries = _query_values(cfg, "shodan_queries")
+    rate_limit = _config_float(cfg, "rate_limit_seconds", 1.0)
+    timeout = _config_float(cfg, "request_timeout_seconds", 15.0, minimum=0.001)
     hits: list[dict] = []
     for q in queries:
         try:
             r = await client.get(
                 "https://api.shodan.io/shodan/host/search",
                 params={"key": key, "query": q, "facets": ""},
-                timeout=cfg.get("request_timeout_seconds", 15.0),
+                timeout=timeout,
             )
             if r.status_code == 429:
                 _log(f"Shodan rate-limited on query: {q[:60]} — backing off.")
@@ -114,13 +147,13 @@ async def _shodan_search(client: httpx.AsyncClient, cfg: dict) -> list[dict]:
             data = r.json()
             for m in data.get("matches", []) or []:
                 host = m.get("ip_str") or m.get("host")
-                port = m.get("port")
+                port = _parse_port(m.get("port")) or 443
                 html = (m.get("http") or {}).get("html", "") or ""
                 if host:
                     hits.append(
                         {
                             "host": host,
-                            "port": port or 443,
+                            "port": port,
                             "html": html,
                             "source": "shodan",
                         }
@@ -128,7 +161,7 @@ async def _shodan_search(client: httpx.AsyncClient, cfg: dict) -> list[dict]:
         except Exception as e:  # noqa: BLE001
             # Request exceptions may embed the full URL (including API keys).
             _log(f"Shodan query failed: {type(e).__name__}")
-        await asyncio.sleep(cfg.get("rate_limit_seconds", 1.0))
+        await asyncio.sleep(rate_limit)
     _log(f"Shodan: {len(hits)} raw hits across {len(queries)} queries.")
     return hits
 
@@ -140,12 +173,14 @@ async def _shodan_search(client: httpx.AsyncClient, cfg: dict) -> list[dict]:
 
 async def _fofa_search(client: httpx.AsyncClient, cfg: dict) -> list[dict]:
     """Query FOFA. query must be base64-encoded. Returns list of {host, port}."""
-    email = cfg.get("fofa_email", "").strip()
-    key = cfg.get("fofa_key", "").strip()
+    email = _clean_text(cfg.get("fofa_email", ""))
+    key = _clean_text(cfg.get("fofa_key", ""))
     if not email or not key:
         _log("FOFA_EMAIL/FOFA_KEY not set — skipping FOFA.")
         return []
-    queries = cfg.get("fofa_queries") or []
+    queries = _query_values(cfg, "fofa_queries")
+    rate_limit = _config_float(cfg, "rate_limit_seconds", 1.0)
+    timeout = _config_float(cfg, "request_timeout_seconds", 15.0, minimum=0.001)
     hits: list[dict] = []
     for q in queries:
         try:
@@ -158,7 +193,7 @@ async def _fofa_search(client: httpx.AsyncClient, cfg: dict) -> list[dict]:
                     "qbase64": q_b64,
                     "fields": "host,ip,port",
                 },
-                timeout=cfg.get("request_timeout_seconds", 15.0),
+                timeout=timeout,
             )
             if r.status_code == 429:
                 _log("FOFA rate-limited — backing off.")
@@ -179,15 +214,14 @@ async def _fofa_search(client: httpx.AsyncClient, cfg: dict) -> list[dict]:
                 else:
                     host_field, explicit_port = "", None
                 host, port = _split_host_port(host_field, default_port=443)
-                if str(explicit_port or "").isdigit():
-                    port = int(explicit_port)
+                port = _parse_port(explicit_port) or port
                 if host:
                     hits.append(
                         {"host": host, "port": port, "html": "", "source": "fofa"}
                     )
         except Exception as e:  # noqa: BLE001
             _log(f"FOFA query failed: {type(e).__name__}")
-        await asyncio.sleep(cfg.get("rate_limit_seconds", 1.0))
+        await asyncio.sleep(rate_limit)
     _log(f"FOFA: {len(hits)} raw hits across {len(queries)} queries.")
     return hits
 
@@ -199,19 +233,21 @@ async def _fofa_search(client: httpx.AsyncClient, cfg: dict) -> list[dict]:
 
 async def _quake_search(client: httpx.AsyncClient, cfg: dict) -> list[dict]:
     """Query Quake 360. API key in X-QuakeToken header. POST JSON body."""
-    key = cfg.get("quake_key", "").strip()
+    key = _clean_text(cfg.get("quake_key", ""))
     if not key:
         _log("QUAKE_KEY not set — skipping Quake.")
         return []
-    queries = cfg.get("quake_queries") or []
+    queries = _query_values(cfg, "quake_queries")
+    rate_limit = _config_float(cfg, "rate_limit_seconds", 1.0)
+    timeout = _config_float(cfg, "request_timeout_seconds", 15.0, minimum=0.001)
     hits: list[dict] = []
     for q in queries:
         try:
             r = await client.post(
-                "https://quake.360.net/api/v3/search/credit",
+                QUAKE_SEARCH_URL,
                 headers={"X-QuakeToken": key, "Content-Type": "application/json"},
                 json={"query": q, "start": 0, "size": 100},
-                timeout=cfg.get("request_timeout_seconds", 15.0),
+                timeout=timeout,
             )
             if r.status_code == 429:
                 _log("Quake rate-limited — backing off.")
@@ -222,18 +258,35 @@ async def _quake_search(client: httpx.AsyncClient, cfg: dict) -> list[dict]:
                 continue
             data = r.json()
             for item in data.get("data", []) or []:
+                if not isinstance(item, dict):
+                    continue
                 parsed = item.get("parsed") or {}
                 service = item.get("service") or {}
-                host = parsed.get("ip") or item.get("ip")
-                port = parsed.get("port") or service.get("port") or 443
-                html = (service.get("http") or {}).get("html", "") or ""
+                if not isinstance(parsed, dict):
+                    parsed = {}
+                if not isinstance(service, dict):
+                    service = {}
+                host = item.get("ip") or parsed.get("ip") or service.get("ip")
+                port = (
+                    _parse_port(item.get("port"))
+                    or _parse_port(parsed.get("port"))
+                    or _parse_port(service.get("port"))
+                    or 443
+                )
+                http_data = service.get("http") or parsed.get("http") or {}
+                if not isinstance(http_data, dict):
+                    http_data = {}
+                html = " ".join(
+                    str(http_data.get(field) or "")
+                    for field in ("html", "body", "title")
+                ).strip()
                 if host:
                     hits.append(
                         {"host": host, "port": port, "html": html, "source": "quake"}
                     )
         except Exception as e:  # noqa: BLE001
             _log(f"Quake query failed: {type(e).__name__}")
-        await asyncio.sleep(cfg.get("rate_limit_seconds", 1.0))
+        await asyncio.sleep(rate_limit)
     _log(f"Quake: {len(hits)} raw hits across {len(queries)} queries.")
     return hits
 
@@ -243,26 +296,53 @@ async def _quake_search(client: httpx.AsyncClient, cfg: dict) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 
+def _parse_port(value: Any) -> int | None:
+    """Return a valid TCP port, rejecting booleans and out-of-range values."""
+    if isinstance(value, bool):
+        return None
+    try:
+        port = int(value)
+    except (TypeError, ValueError):
+        return None
+    return port if 1 <= port <= 65535 else None
+
+
 def _split_host_port(host_field: str, default_port: int) -> tuple[str, int]:
-    """Split 'host:port' (FOFA format). IPv6 in brackets."""
+    """Split API host fields, including URLs and bracketed/bare IPv6."""
     host_field = (host_field or "").strip()
     if not host_field:
         return "", default_port
+    if "://" in host_field:
+        try:
+            parsed = urlsplit(host_field)
+            host = parsed.hostname or ""
+            scheme_port = 443 if parsed.scheme.lower() == "https" else 80
+            return host, _parse_port(parsed.port) or scheme_port
+        except (TypeError, ValueError):
+            return "", default_port
     if host_field.startswith("["):
         # [ipv6]:port
         end = host_field.find("]")
         if end != -1:
             host = host_field[1:end]
             rest = host_field[end + 1 :]
-            port = (
-                int(rest.lstrip(":"))
-                if rest.startswith(":") and rest[1:].isdigit()
-                else default_port
-            )
+            port = _parse_port(rest[1:]) if rest.startswith(":") else None
+            if rest.startswith(":") and rest[1:] and port is None:
+                return "", default_port
+            port = port or default_port
             return host, port
+    try:
+        ipaddress.ip_address(host_field)
+    except ValueError:
+        pass
+    else:
+        return host_field, default_port
     parts = host_field.rsplit(":", 1)
+    port = _parse_port(parts[1]) if len(parts) == 2 else None
+    if port is not None:
+        return parts[0], port
     if len(parts) == 2 and parts[1].isdigit():
-        return parts[0], int(parts[1])
+        return "", default_port
     return host_field, default_port
 
 
@@ -388,11 +468,12 @@ def _approved_panel_targets(cfg: dict) -> list[dict]:
         elif isinstance(item, dict):
             host_field = str(item.get("host") or "")
             host, parsed_port = _split_host_port(host_field, 443)
-            port = item.get("port") or parsed_port
-            try:
-                port = int(port)
-            except (TypeError, ValueError):
-                continue
+            if "port" in item:
+                port = _parse_port(item.get("port"))
+                if port is None:
+                    continue
+            else:
+                port = parsed_port
             target = {"host": host, "port": port, "source": "approved-config"}
         else:
             continue
@@ -416,17 +497,18 @@ async def _register_and_grab_sub(
     brute force — first non-success is a skip.
     """
     pr = cfg.get("panel_register", {}) or {}
-    email = pr.get("default_email", "gray@protonmail.com")
-    password = pr.get("default_password", "").strip()
+    email = str(pr.get("default_email") or "gray@protonmail.com")
+    password = str(pr.get("default_password") or "").strip()
     if not password:
         _log(f"  PANEL_PASSWORD not set — cannot register on {host}:{port}.")
         return None
     base = _panel_url(host, port)
+    timeout = _config_float(cfg, "request_timeout_seconds", 15.0, minimum=0.001)
     register_path = pr.get("register_path", "/api/v1/passport/auth/register")
     sub_path = pr.get("sub_path", "/api/v1/user/getSubscribe")
 
     # 1. Register
-    reg_url = f"{base}{register_path}"
+    reg_url = urljoin(f"{base}/", str(register_path).lstrip("/"))
     allowed, reason = await _validate_public_url(reg_url)
     if not allowed:
         _log(f"  blocked approved panel ({reason}): {_redact_url(reg_url)}")
@@ -440,7 +522,7 @@ async def _register_and_grab_sub(
                 "email_code": "",
                 "invite_code": "",
             },
-            timeout=cfg.get("request_timeout_seconds", 15.0),
+            timeout=timeout,
         )
     except Exception as e:  # noqa: BLE001
         _log(f"  register connect failed {host}:{port}: {type(e).__name__}")
@@ -464,9 +546,27 @@ async def _register_and_grab_sub(
 
     # V2Board/Xboard register returns {data: {...}, code: 0} on success.
     data = body.get("data") if isinstance(body, dict) else None
-    token = None
+    token: Any = None
     if isinstance(data, dict):
-        token = data.get("token") or (data.get("auth_data") or {}).get("token")
+        auth_data = data.get("auth_data")
+        token = data.get("token")
+        if not token and isinstance(auth_data, dict):
+            token = auth_data.get("token")
+        if not token and isinstance(auth_data, str):
+            token = auth_data
+    elif isinstance(data, str):
+        token = data
+    if not token and isinstance(body, dict):
+        auth_data = body.get("auth_data")
+        token = body.get("token")
+        if not token and isinstance(auth_data, dict):
+            token = auth_data.get("token")
+        if not token and isinstance(auth_data, str):
+            token = auth_data
+    if not isinstance(token, str) or not token.strip():
+        token = None
+    else:
+        token = token.strip()
     if not token:
         _log(
             f"  register OK but no token returned on {host}:{port} — "
@@ -477,7 +577,7 @@ async def _register_and_grab_sub(
     _log(f"  registered on {host}:{port}, token acquired.")
 
     # 2. Get subscribe URL
-    sub_url = f"{base}{sub_path}"
+    sub_url = urljoin(f"{base}/", str(sub_path).lstrip("/"))
     allowed, reason = await _validate_public_url(sub_url)
     if not allowed:
         _log(f"  blocked panel API URL ({reason}): {_redact_url(sub_url)}")
@@ -485,8 +585,12 @@ async def _register_and_grab_sub(
     try:
         sr = await client.get(
             sub_url,
-            headers={"Authorization": f"Bearer {token}"},
-            timeout=cfg.get("request_timeout_seconds", 15.0),
+            headers={
+                "Authorization": (
+                    token if token.lower().startswith("bearer ") else f"Bearer {token}"
+                )
+            },
+            timeout=timeout,
         )
     except Exception as e:  # noqa: BLE001
         _log(f"  getSubscribe connect failed {host}:{port}: {type(e).__name__}")
@@ -507,10 +611,10 @@ async def _register_and_grab_sub(
         _log(f"  getSubscribe no data on {host}:{port} — skip.")
         return None
     subscribe_url = sdata.get("subscribe_url") or sdata.get("token")
-    if not subscribe_url:
+    if not isinstance(subscribe_url, str) or not subscribe_url.strip():
         _log(f"  getSubscribe no subscribe_url on {host}:{port} — skip.")
         return None
-    return subscribe_url
+    return urljoin(f"{base}/", subscribe_url.strip())
 
 
 async def _fetch_subscribe_uris(
@@ -529,17 +633,7 @@ async def _fetch_subscribe_uris(
         return []
     text = r.text.strip()
 
-    # Try base64 decode (subscription endpoints commonly return base64 blob).
-    decoded = None
-    try:
-        # base64 can have whitespace/newlines; strip then decode.
-        candidate = re.sub(r"\s+", "", text)
-        if re.fullmatch(r"[A-Za-z0-9+/=]{32,}", candidate):
-            decoded = base64.b64decode(candidate, validate=True).decode(
-                "utf-8", errors="ignore"
-            )
-    except Exception:  # noqa: BLE001
-        decoded = None
+    decoded = _decode_subscription_blob(text)
 
     # Search original + decoded (whichever yields URIs).
     uris: list[str] = []
@@ -547,7 +641,21 @@ async def _fetch_subscribe_uris(
         uris = URI_RE.findall(blob or "")
         if uris:
             break
-    return uris
+    return list(dict.fromkeys(uris))
+
+
+def _decode_subscription_blob(text: str) -> str | None:
+    """Decode padded/unpadded standard or URL-safe subscription Base64."""
+    candidate = re.sub(r"\s+", "", text or "")
+    if not re.fullmatch(r"[A-Za-z0-9+/_=-]{8,}", candidate):
+        return None
+    padded = candidate + "=" * (-len(candidate) % 4)
+    try:
+        return base64.b64decode(padded, altchars=b"-_", validate=True).decode(
+            "utf-8", errors="ignore"
+        )
+    except (ValueError, UnicodeError):
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -560,14 +668,21 @@ def _dedup_panels(*hit_lists: list[dict]) -> list[dict]:
     seen: dict[str, dict] = {}
     for hits in hit_lists:
         for h in hits:
-            key = f"{h.get('host')}:{h.get('port')}"
+            host = str(h.get("host") or "").strip()
+            port = _parse_port(h.get("port"))
+            if not host or port is None:
+                continue
+            key = f"{host.lower()}:{port}"
+            candidate = dict(h)
+            candidate["host"] = host
+            candidate["port"] = port
             if key in seen:
                 # merge html so panel-marker check sees all evidence
                 if h.get("html"):
                     cur = seen[key]
                     cur["html"] = (cur.get("html") or "") + " " + h["html"]
                 continue
-            seen[key] = dict(h)
+            seen[key] = candidate
     # sort: panel-looking hits first
     return sorted(seen.values(), key=lambda h: not _looks_like_panel(h))
 
@@ -594,7 +709,12 @@ def _append_uris(uris: list[str]) -> int:
                         existing.add(raw)
                 except Exception:
                     existing.add(line)
-    new = [u for u in uris if u and u not in existing]
+    new: list[str] = []
+    for uri in uris:
+        if not uri or uri in existing:
+            continue
+        existing.add(uri)
+        new.append(uri)
     # Ensure the file always exists (touch) so downstream G3 resin publisher
     # has a stable path to read even when this run found nothing.
     GRAY_NODES_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -630,9 +750,10 @@ def _append_panel_leads(panels: list[dict]) -> int:
     written = 0
     with PANEL_LEADS_FILE.open("a", encoding="utf-8") as handle:
         for panel in panels:
+            port = _parse_port(panel.get("port")) or 443
             key = (
                 str(panel.get("host") or ""),
-                int(panel.get("port") or 443),
+                port,
                 str(panel.get("source") or "unknown"),
             )
             if not key[0] or key in existing:
@@ -664,10 +785,15 @@ def _update_last_run(summary: dict) -> None:
             payload = json.loads(LAST_RUN_FILE.read_text(encoding="utf-8"))
         except Exception:  # noqa: BLE001
             payload = {}
+    now = int(time.time())
     stages = payload.get("stages") if isinstance(payload.get("stages"), dict) else {}
-    stages["gray"] = {"ts": int(time.time()), "counts": summary}
+    stages["gray"] = {"ts": now, "counts": summary}
     payload["stages"] = stages
-    payload["last_gray_run"] = int(time.time())
+    payload["stage"] = 10
+    payload["ts"] = now
+    payload["counts"] = {"gray-crawl": summary}
+    payload["last_stage_cmd"] = "gray-crawl"
+    payload["last_gray_run"] = now
     LAST_RUN_FILE.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
     )
@@ -678,21 +804,8 @@ def _update_last_run(summary: dict) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def _run_async() -> dict:
-    cfg = load_config()
-    summary = {
-        "shodan_hits": 0,
-        "fofa_hits": 0,
-        "quake_hits": 0,
-        "panels_found": 0,
-        "leads_written": 0,
-        "approved_targets": 0,
-        "panels_registered": 0,
-        "nodes_collected": 0,
-        "skipped_no_key": [],
-    }
-
-    timeout = cfg.get("request_timeout_seconds", 15.0)
+async def _run_async_pipeline(cfg: dict, summary: dict) -> None:
+    timeout = _config_float(cfg, "request_timeout_seconds", 15.0, minimum=0.001)
     headers = {"User-Agent": "gray-aggregator/1.0"}
 
     async with httpx.AsyncClient(
@@ -706,13 +819,6 @@ async def _run_async() -> dict:
         summary["fofa_hits"] = len(fofa_hits)
         summary["quake_hits"] = len(quake_hits)
 
-        if not (cfg.get("shodan_api_key", "").strip()):
-            summary["skipped_no_key"].append("shodan")
-        if not (cfg.get("fofa_email", "").strip() and cfg.get("fofa_key", "").strip()):
-            summary["skipped_no_key"].append("fofa")
-        if not cfg.get("quake_key", "").strip():
-            summary["skipped_no_key"].append("quake")
-
         panels = _dedup_panels(shodan_hits, fofa_hits, quake_hits)
         summary["panels_found"] = len(panels)
         _log(f"Unique panel candidates: {len(panels)}.")
@@ -720,12 +826,15 @@ async def _run_async() -> dict:
 
     approved_targets = _approved_panel_targets(cfg)
     summary["approved_targets"] = len(approved_targets)
+    all_uris: list[str] = []
     if not approved_targets:
         _log("Registration gate closed; passive leads only.")
     else:
-        max_attempts = int(cfg.get("max_panel_attempts", 50))
-        all_uris: list[str] = []
-        panel_verify = bool((cfg.get("panel_register") or {}).get("verify_tls", True))
+        try:
+            max_attempts = max(0, int(cfg.get("max_panel_attempts", 50)))
+        except (TypeError, ValueError):
+            max_attempts = 0
+        panel_verify = (cfg.get("panel_register") or {}).get("verify_tls") is not False
         async with httpx.AsyncClient(
             verify=panel_verify,
             timeout=timeout,
@@ -751,10 +860,48 @@ async def _run_async() -> dict:
                 else:
                     _log("  no URIs in subscribe content.")
 
-        # Dedup + append to state file.
-        added = _append_uris(all_uris)
-        summary["nodes_collected"] = added
-        _log(f"Wrote {added} quarantined records to {GRAY_NODES_FILE}.")
+    # Always materialize the quarantine path, including passive-only runs.
+    added = _append_uris(all_uris)
+    summary["nodes_collected"] = added
+    _log(f"Wrote {added} quarantined records to {GRAY_NODES_FILE}.")
+
+
+async def _run_async() -> dict:
+    cfg = load_config()
+    summary = {
+        "success": True,
+        "shodan_hits": 0,
+        "fofa_hits": 0,
+        "quake_hits": 0,
+        "panels_found": 0,
+        "leads_written": 0,
+        "approved_targets": 0,
+        "panels_registered": 0,
+        "nodes_collected": 0,
+        "skipped_no_key": [],
+    }
+    if not _clean_text(cfg.get("shodan_api_key")):
+        summary["skipped_no_key"].append("shodan")
+    if not (_clean_text(cfg.get("fofa_email")) and _clean_text(cfg.get("fofa_key"))):
+        summary["skipped_no_key"].append("fofa")
+    if not _clean_text(cfg.get("quake_key")):
+        summary["skipped_no_key"].append("quake")
+
+    max_run_seconds = _config_float(cfg, "max_run_seconds", 90.0, minimum=1.0)
+    try:
+        await asyncio.wait_for(
+            _run_async_pipeline(cfg, summary), timeout=max_run_seconds
+        )
+    except TimeoutError:
+        summary.update(
+            {
+                "success": False,
+                "reason": "timeout",
+                "error": f"gray-crawl exceeded {max_run_seconds:g}s",
+            }
+        )
+        _log(summary["error"])
+        _append_uris([])
 
     _update_last_run(summary)
     return summary

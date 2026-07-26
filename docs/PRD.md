@@ -664,7 +664,17 @@ admin@demo.com 預設（Xboard 安裝文件建議）
 
 ---
 
-## 階段 20 — 修 verifier D1 持久化 bug（audit C1/M1/m7）【白】
+## 階段 20 — 修 verifier D1 持久化 bug（audit C1/M1/m7）【白】✅
+
+> **完成註記（2026-07-26）**：C1/M1/m7 三項均已修入現行碼並有回歸測試覆蓋，本階段收斂。
+> - C1：`_verify_logic` 自建 `name_to_uri`（`cli.py` ~L790，斷言唯一名），全程以 URI 為 key，
+>   `-rename=false` 隔離進程，最後 `UPDATE nodes SET alive=?, latency_ms=?, download_speed=?`
+>   於 `BEGIN IMMEDIATE` 交易回寫 D1（`cli.py` ~L1173）。覆蓋：`tests/test_pipeline.py`。
+> - M1：`parser._parse_ss` 支援三種 SIP002 形式（userinfo-base64 / 純 userinfo / 全 base64 legacy），
+>   `method` 不丟。覆蓋：`tests/test_formats.py::test_shadowsocks_requires_and_preserves_method`
+>   + `::test_shadowsocks_legacy_base64_uri_round_trip`。
+> - m7：`dedupe.normalize_node` 與 `models.ProxyNode.dedup_key` 均排除 `download_speed`。
+>   覆蓋：`tests/test_formats.py::test_content_hash_and_dedup_ignore_download_speed`。
 
 **目標**：修 audit 發現的 verifier 沒正確寫 D1 + ss SIP002 解析 + content_hash 排除 download_speed。
 
@@ -676,10 +686,76 @@ admin@demo.com 預設（Xboard 安裝文件建議）
 5. 加「未解析列」計數器 + 警告（M3）。
 
 ### 20.2 驗收
-- [ ] 跑 verify 後 D1 `alive`/`latency_ms`/`download_speed` 非 NULL
-- [ ] ss URI round-trip 正確（method 不丟）
-- [ ] content_hash verify 前後一致
-- [ ] publish 在有 alive 節點時發布 > 0
+- [x] 跑 verify 後 D1 `alive`/`latency_ms`/`download_speed` 非 NULL
+- [x] ss URI round-trip 正確（method 不丟）
+- [x] content_hash verify 前後一致
+- [x] publish 在有 alive 節點時發布 > 0
+
+---
+
+## Candidate source audit / canary policy
+
+候選來源先寫入 `state/candidates.jsonl`，不得直接加入
+`state/sources.json` 或核心 `fetch`。每筆候選至少包含：
+
+```json
+{
+  "id": "CANDIDATE_ID",
+  "candidate_round": 1,
+  "url": "SOURCE_URL",
+  "canonical": "CANONICAL_URL",
+  "mirrors": [],
+  "format": "raw|clash|v2ray|singbox",
+  "tier": 3,
+  "max_nodes": 100,
+  "sample_strategy": "stable_hash",
+  "enabled": false,
+  "status": "candidate",
+  "discovered_at": "ISO_TIMESTAMP"
+}
+```
+
+`candidate_round: 1` 僅收錄小型、低關聯且容易人工檢查的來源；
+`candidate_round: 2` 收錄大型 aggregate、輪替 shard 或需要更多 provenance
+證據的 deferred 來源。
+兩輪都保持 `enabled: false`。parse 順序固定為每來源 semantic dedupe、再以
+`stable_hash` 取樣；來源 `max_nodes` 為 accepted 上限，`null` 才是不設上限。
+固定 seed 為 `free-proxy-source-sampling-v1`；seed、cap 或 canonical URL 改動都會重置 canary history。
+
+### Audit command
+
+```powershell
+python src/aggregator/cli.py audit-sources --round 1 --no-verify --output state/source-audit.json
+python src/aggregator/cli.py audit-sources --round 2 --verify --max-runtime 300
+python src/aggregator/cli.py audit-sources --candidate CANDIDATE_ID --verify
+python src/aggregator/cli.py audit-sources --candidate CANDIDATE_ID --verify --require-promotion-ready
+```
+
+Audit 是 read-only candidate operation，預設只寫 `state/source-audit.json`。
+它可以讀 `state/live.jsonl` 作為 semantic overlap baseline，但不得寫入或合併
+`state/staging.jsonl`、`state/live.jsonl`、`nodes.db` 或 Worker snapshot，也不得
+呼叫 `publish`。Canary total cap 為 `canary_max_total_nodes: 650`；production
+parse cap 為 `max_total_nodes: 1800`。任一 cap 超限都 fail closed 並保留舊
+production snapshot，不可透過靜默丟棄節點繞過上限。Audit output/history 也不得
+指向 baseline、`state/sources.json`、`state/candidates.jsonl` 或 `output/*`。
+
+### Promotion gate
+
+Promotion 不是 crawl/audit 的副作用。每個候選以獨立 projection fingerprint
+累積證據；批次 canary 的紀錄可由 `--candidate` 單來源 review 延續使用，但 URL、round、
+cap、seed、parser/semantic-key、verifier 版本、品質門檻、baseline semantic hash 或上游
+body/node-set 改動都會重置該候選紀錄。History schema v2 不沿用舊版缺少內容投影的證據。
+每個候選必須留下 **3 次成功 audit across 48h（時間跨至少 48 小時）**；每次都要通過
+parse quality、semantic overlap、mirror eligibility（semantic Jaccard >= 0.80），以及指定時的 Tier-1 /
+Tier-2 gate；同一候選任何一次 verified failure 都會中斷連續紀錄。
+Round 1 另須至少一次 batch evidence：net-new Tier-2 至少兩種 protocol family，且包含
+`hysteria2`、`tuic`、`juicity` 或 `ssr` 之一。人員完成審核後，才可一次只把一個候選複製到
+`state/sources.json`，改為 `tier: 2`、保留審計時的 `max_nodes`，且只帶入 Jaccard
+`>= 0.80` 的 mirror；啟用仍須另一次明確變更。
+
+Canary 絕不 `publish`（`CANARY: never publish`）、絕不自動啟用候選，
+也不接入 production snapshots（`never attach to production snapshots`）。
+驗收需確認 audit report 的輸出路徑、cap、round、gate reason 與歷史紀錄可追溯。
 
 ---
 

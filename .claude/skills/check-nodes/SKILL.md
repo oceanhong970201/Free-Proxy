@@ -1,28 +1,17 @@
 ---
 name: check-nodes
-description: Verify liveness of staged proxy nodes via clash-speedtest
+description: Run the repository verifier without bypassing its fail-closed checks
 disable-model-invocation: true
-allowed-tools: Bash(python *), Bash(${CLAUDE_PROJECT_DIR}/.claude/scripts/verify.py *), Read, Write
-shell: bash
+allowed-tools: Read
 ---
 
-Run node verification (liveness + latency) against `state/staging.jsonl` and produce `state/live.jsonl` plus a backfill into `nodes.db`.
+Use only the canonical command from the repository root:
 
-## Behavior
+```text
+python src/aggregator/cli.py verify
+```
 
-Run the verifier:
-
-!`python ${CLAUDE_PROJECT_DIR}/src/aggregator/cli.py verify`
-
-Then show the live node count:
-
-!`wc -l < ${CLAUDE_PROJECT_DIR}/state/live.jsonl`
-
-## Report
-
-Summarize:
-- total staged nodes (staging.jsonl line count)
-- live count (live.jsonl line count)
-- dead count (staged − live)
-- median latency in ms (from the verifier output / nodes.db)
-- any protocol with zero survivors (worth flagging for source-quality review)
+Do not invoke the verifier binary with an ad-hoc schema, reuse endpoint-level
+results, edit `alive` manually, or publish when the command exits nonzero.
+`state/verify-progress.json` is the only supported resume state. Report the
+structured summary and leave the previous DB/live snapshot in place on error.

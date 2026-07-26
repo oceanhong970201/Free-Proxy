@@ -44,6 +44,8 @@ panel_register:
 # ---- Rate limiting (per API) ----
 rate_limit_seconds: 1.0   # Shodan/FOFA/Quake: 1 req/s politeness
 request_timeout_seconds: 15.0
+# Hard deadline for the complete discovery + approved-target review run.
+max_run_seconds: 90.0
 # Max panels to attempt registration against per run (cap blast radius)
 max_panel_attempts: 50
 
@@ -51,6 +53,7 @@ max_panel_attempts: 50
 scan:
   enabled: false
   leads_only: true
+  discovery_engine: auto  # masscan when available, otherwise nmap connect scan
   ports_tcp: [8388, 443, 8080, 2052, 2083, 2087, 2096, 8443, 7001]
   ports_udp: [443, 36712, 51820]
   rate: 10000
