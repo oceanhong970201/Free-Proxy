@@ -10,8 +10,9 @@
     "enabled": true,
     "tier": 1,
     "last_fetch": 1784114459,
-    "last_count": null,
-    "status": "ok"
+    "last_count": 400,
+    "status": "ok",
+    "max_nodes": 400
   },
   {
     "id": "au1rxx-singbox",
@@ -24,8 +25,9 @@
     "enabled": true,
     "tier": 1,
     "last_fetch": 1784114459,
-    "last_count": null,
-    "status": "ok"
+    "last_count": 400,
+    "status": "ok",
+    "max_nodes": 400
   },
   {
     "id": "au1rxx-v2ray",
@@ -38,8 +40,9 @@
     "enabled": true,
     "tier": 1,
     "last_fetch": 1784114459,
-    "last_count": null,
-    "status": "ok"
+    "last_count": 400,
+    "status": "ok",
+    "max_nodes": 400
   },
   {
     "id": "pawdroid-free",
@@ -51,7 +54,7 @@
     "enabled": false,
     "tier": 1,
     "last_fetch": 1784114459,
-    "last_count": null,
+    "last_count": 0,
     "status": "dropped",
     "note": "DROPPED 2026-07-15: CI verify measured 0 contribution to /sub (12 candidate nodes, 0 Tier2 alive)."
   },
@@ -65,9 +68,10 @@
     "enabled": true,
     "tier": 1,
     "last_fetch": 1784114459,
-    "last_count": null,
+    "last_count": 61,
     "status": "ok",
-    "note": "Verified 2026-07-15: ~61 base64 nodes. Bonus sub/sub_merge.txt has 5103 plain URIs."
+    "note": "Verified 2026-07-15: ~61 base64 nodes. Bonus sub/sub_merge.txt has 5103 plain URIs.",
+    "max_nodes": 200
   },
   {
     "id": "mfuu-v2ray",
@@ -79,7 +83,7 @@
     "enabled": false,
     "tier": 1,
     "last_fetch": 1784114459,
-    "last_count": null,
+    "last_count": 0,
     "status": "invalid-yaml",
     "note": "Disabled 2026-07-16: upstream clash.yaml is syntactically invalid (unescaped quotes in flow mappings). Re-enable only after parser validation passes."
   },
@@ -93,9 +97,10 @@
     "enabled": true,
     "tier": 1,
     "last_fetch": 1784114459,
-    "last_count": null,
+    "last_count": 300,
     "status": "ok",
-    "note": "Verified 2026-07-15: ~282 base64 nodes."
+    "note": "Verified 2026-07-15: ~282 base64 nodes.",
+    "max_nodes": 300
   },
   {
     "id": "ts-sf-fly",
@@ -107,9 +112,10 @@
     "enabled": true,
     "tier": 1,
     "last_fetch": 1784114459,
-    "last_count": null,
+    "last_count": 125,
     "status": "ok",
-    "note": "Verified 2026-07-15: ~117 base64 nodes (also has clash at /main/clash)."
+    "note": "Verified 2026-07-15: ~117 base64 nodes (also has clash at /main/clash).",
+    "max_nodes": 200
   },
   {
     "id": "vovaplus-vless",
@@ -121,9 +127,10 @@
     "enabled": true,
     "tier": 1,
     "last_fetch": 1784114459,
-    "last_count": null,
+    "last_count": 71,
     "status": "ok",
-    "note": "Verified 2026-07-15: ~105 curated vless clash nodes (speed-test-filtered, low volume high quality)."
+    "note": "Verified 2026-07-15: ~105 curated vless clash nodes (speed-test-filtered, low volume high quality).",
+    "max_nodes": 200
   },
   {
     "id": "vpnsuper-feed",
@@ -133,7 +140,7 @@
     "enabled": false,
     "tier": 1,
     "last_fetch": 1784063425,
-    "last_count": 3945,
+    "last_count": 0,
     "status": "mihomo-incompatible",
     "note": "DISABLED: supx_v1 is a private trojan variant. Verified 0/3945 alive under mihomo (clash-speedtest / Clash Verge core). USABLE_NODES says it imports into sing-box/xray, but mihomo cannot connect to supx_v1. Channel code retained; re-enable only if targeting a sing-box/xray client."
   },
@@ -148,7 +155,7 @@
     "enabled": false,
     "tier": 2,
     "last_fetch": 1784023664,
-    "last_count": null,
+    "last_count": 0,
     "status": "dropped"
   },
   {
@@ -162,7 +169,7 @@
     "enabled": false,
     "tier": 2,
     "last_fetch": 1784023664,
-    "last_count": null,
+    "last_count": 0,
     "status": "dropped"
   },
   {
@@ -176,7 +183,7 @@
     "enabled": false,
     "tier": 9,
     "last_fetch": 1784023664,
-    "last_count": null,
+    "last_count": 0,
     "status": "dropped"
   },
   {
@@ -190,7 +197,7 @@
     "enabled": false,
     "tier": 9,
     "last_fetch": 1784023664,
-    "last_count": null,
+    "last_count": 0,
     "status": "dropped"
   },
   {
@@ -203,7 +210,7 @@
     "enabled": false,
     "tier": 3,
     "last_fetch": 1784225835,
-    "last_count": 9,
+    "last_count": 0,
     "status": "canary-validated",
     "note": "Disabled canary validated 2026-07-17 on primary: 9 parsed/9 unique; Tier 1 8/9 (median 385.5 ms); Tier 2 3/8; published overlap 0. Mirror semantic intersection 0 (Jaccard 0.000); keep disabled."
   },
@@ -217,7 +224,7 @@
     "enabled": false,
     "tier": 3,
     "last_fetch": 1784225835,
-    "last_count": 124,
+    "last_count": 0,
     "status": "canary-validated",
     "note": "Disabled canary validated 2026-07-17 on primary: 124 parsed/122 unique; Tier 1 75/122 (median 336 ms); Tier 2 13/75; published overlap 5. Mirror Jaccard 0.155; keep disabled."
   },
@@ -231,7 +238,7 @@
     "enabled": false,
     "tier": 3,
     "last_fetch": 1784225835,
-    "last_count": 259,
+    "last_count": 0,
     "status": "canary-validated",
     "note": "Disabled canary validated 2026-07-17 on primary: 259 parsed/200 unique; Tier 1 113/200 (median 656 ms); Tier 2 13/113; published overlap 0. Mirror Jaccard 0.485; keep disabled."
   }
