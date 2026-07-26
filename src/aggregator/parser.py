@@ -14,7 +14,7 @@ from .models import ProxyNode, validate_proxy_node
 
 
 CONFIG_RE = re.compile(
-    r"(?<![\w-])((?:vmess|vless|trojan|ss|ssr|tuic|hysteria2?|hy2|juicity)://[^\s<>]+)",
+    r"(?<![\w-])((?:vmess|vless|trojan|ss|ssr|tuic|hysteria2?|hy2|juicity|anytls)://[^\s<>]+)",
     re.IGNORECASE,
 )
 
@@ -470,6 +470,8 @@ def _parse_query_uri(uri: str, proto: str) -> ProxyNode | None:
         node.password = uri_password or _query_value(query, "password") or None
     elif proto == "hysteria2":
         node.password = joined_credential or _query_value(query, "password") or None
+    elif proto == "anytls":
+        node.password = joined_credential or _query_value(query, "password") or None
 
     node.sni = _query_value(query, "sni", "peer", "server_name")
     node.net = normalized_network
@@ -529,6 +531,7 @@ def parse_uri(uri: str) -> ProxyNode | None:
         "hysteria",
         "hy2",
         "juicity",
+        "anytls",
     ):
         if node is None and lowered.startswith(f"{scheme}://"):
             normalized = "hysteria2" if scheme in {"hy2", "hysteria"} else scheme

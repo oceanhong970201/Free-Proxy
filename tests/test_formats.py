@@ -9,6 +9,7 @@ import yaml
 from src.aggregator.dedupe import content_hash, dedupe_nodes, node_dedup_key
 from src.aggregator.emit import (
     UnsupportedOutbound,
+    clash_skip_reason,
     emit_clash,
     emit_singbox,
     filter_alive,
@@ -137,6 +138,46 @@ def test_shadowsocks_requires_and_preserves_method() -> None:
         emit_clash([missing_method])
     with pytest.raises(UnsupportedOutbound, match="Shadowsocks"):
         emit_singbox([missing_method])
+
+
+def test_anytls_uri_round_trip_and_emit() -> None:
+    # W1 / AnyTLS: password auth, always-TLS, no V2Ray transport; emit clash + sing-box.
+    node = parse_uri(
+        "anytls://s3cret@anytls.example:8443?sni=anytls.example&insecure=1#anytls"
+    )
+    assert node is not None
+    assert node.proto == "anytls"
+    assert node.host == "anytls.example"
+    assert node.port == 8443
+    assert node.password == "s3cret"
+    assert node.sni == "anytls.example"
+    assert node.tls is True
+    assert node.security == "tls"
+    assert node.skip_cert_verify is True
+    assert node.net is None
+    assert node.uuid is None
+
+    reparsed = parse_uri(node_to_uri(node))
+    assert reparsed is not None
+    assert reparsed.dedup_key() == node.dedup_key()
+
+    clash = to_clash_dict(node)
+    assert clash["type"] == "anytls"
+    assert clash["password"] == "s3cret"
+    assert clash["sni"] == "anytls.example"
+    assert clash["skip-cert-verify"] is True
+    assert "network" not in clash  # anytls carries no V2Ray transport
+    assert clash_skip_reason(node) is None  # mihomo supports anytls -> verifiable
+
+    sb = to_singbox_outbound(node)
+    assert sb["type"] == "anytls"
+    assert sb["password"] == "s3cret"
+    assert sb["tls"]["enabled"] is True
+    assert sb["tls"]["server_name"] == "anytls.example"
+    assert sb["tls"]["insecure"] is True
+
+    # anytls without a password must be rejected
+    assert parse_uri("anytls://@anytls.example:8443") is None
 
 
 def test_shadowsocks_legacy_base64_uri_round_trip() -> None:

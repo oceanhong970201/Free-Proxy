@@ -16,6 +16,7 @@ SUPPORTED_PROTOCOLS = {
     "hysteria2",
     "tuic",
     "juicity",
+    "anytls",
 }
 SUPPORTED_TRANSPORTS = {
     "tcp",
@@ -26,7 +27,7 @@ SUPPORTED_TRANSPORTS = {
     "xhttp",
     "httpupgrade",
 }
-TLS_DEFAULT_PROTOCOLS = {"trojan", "tuic", "hysteria2", "juicity"}
+TLS_DEFAULT_PROTOCOLS = {"trojan", "tuic", "hysteria2", "juicity", "anytls"}
 # Versioned seed for deterministic per-source membership sampling. Changing it
 # is an intentional source-set migration and must reset canary history.
 STABLE_SAMPLE_SEED = "free-proxy-source-sampling-v1"
@@ -264,7 +265,7 @@ def validate_proxy_node(node: ProxyNode) -> ProxyNode:
     elif node.alter_id is not None:
         raise ValueError(f"alter_id is only valid for vmess, not {proto}")
 
-    if proto in {"trojan", "hysteria2"} and not (node.password or ""):
+    if proto in {"trojan", "hysteria2", "anytls"} and not (node.password or ""):
         raise ValueError(f"{proto} requires password")
     if proto in {"tuic", "juicity"} and (
         not (node.uuid or "").strip() or not (node.password or "")

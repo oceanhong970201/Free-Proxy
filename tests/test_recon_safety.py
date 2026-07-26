@@ -28,6 +28,21 @@ class _Response:
         return self._payload
 
 
+def test_tg_before_cursor_prefers_native_data_before():
+    # W1: prefer the page's native data-before cursor; fall back to min(data-post).
+    native = (
+        '<div class="tgme_widget_message" data-post="chan/500"></div>'
+        '<a class="tme_messages_more" data-before="450" href="?before=450">'
+    )
+    fallback = (
+        '<div class="tgme_widget_message" data-post="chan/500"></div>'
+        '<div class="tgme_widget_message" data-post="chan/498"></div>'
+    )
+    assert tg_recon._page_before_cursor(native) == 450
+    assert tg_recon._page_before_cursor(fallback) == 498
+    assert tg_recon._page_before_cursor("<div></div>") is None
+
+
 def test_gray_publish_gate_is_fail_closed():
     uri = "vless://id@example.net:443"
     assert resin_publisher._extract_enabled_gray_uri(uri)[0] is None

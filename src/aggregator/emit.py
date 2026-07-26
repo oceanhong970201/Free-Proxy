@@ -24,7 +24,7 @@ OUTPUT_DIR = ROOT / "output"
 FEED_FILE = OUTPUT_DIR / "feed.xml"
 PIPELINE_STATUS_SCHEMA_VERSION = 1
 
-_TLS_DEFAULT_PROTOCOLS = {"trojan", "tuic", "hysteria2", "juicity"}
+_TLS_DEFAULT_PROTOCOLS = {"trojan", "tuic", "hysteria2", "juicity", "anytls"}
 _SS_METHOD_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
 
 
@@ -478,6 +478,7 @@ def to_clash_dict(node: ProxyNode) -> dict:
         "ssr",
         "hysteria2",
         "tuic",
+        "anytls",
     }:
         raise UnsupportedOutbound(f"unsupported Clash protocol: {proto}")
     _validate_credentials(node)
@@ -504,6 +505,8 @@ def to_clash_dict(node: ProxyNode) -> dict:
         if node.packet_encoding:
             output["packet-encoding"] = node.packet_encoding
     elif proto == "trojan":
+        output["password"] = node.password
+    elif proto == "anytls":
         output["password"] = node.password
     elif proto == "ss":
         output.update({"cipher": node.method, "password": node.password})
@@ -649,7 +652,7 @@ def to_singbox_outbound(node: ProxyNode) -> dict:
         raise UnsupportedOutbound(f"sing-box does not support {proto}")
     if node.spider_x:
         raise UnsupportedOutbound("sing-box does not support Reality spider_x")
-    if proto not in {"vmess", "vless", "trojan", "ss", "hysteria2", "tuic"}:
+    if proto not in {"vmess", "vless", "trojan", "ss", "hysteria2", "tuic", "anytls"}:
         raise UnsupportedOutbound(f"unsupported sing-box protocol: {proto}")
     _validate_credentials(node)
 
@@ -669,7 +672,7 @@ def to_singbox_outbound(node: ProxyNode) -> dict:
             output["flow"] = node.flow
         if node.packet_encoding:
             output["packet_encoding"] = node.packet_encoding
-    elif proto in {"trojan", "hysteria2"}:
+    elif proto in {"trojan", "hysteria2", "anytls"}:
         output["password"] = node.password
     elif proto == "ss":
         output.update({"method": node.method, "password": node.password})

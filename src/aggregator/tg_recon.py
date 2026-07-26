@@ -163,6 +163,26 @@ def _earliest_message_id(html: str) -> int | None:
     return min(ids) if ids else None
 
 
+_DATA_BEFORE_RE = re.compile(r'data-before="(\d+)"')
+
+
+def _page_before_cursor(html: str) -> int | None:
+    """Native backward-pagination cursor from the page's ``data-before`` attr.
+
+    Telegram emits ``data-before="<id>"`` on the load-more anchor of a t.me/s/
+    page; it is the canonical ``?before=`` cursor and, unlike a
+    ``min(data-post)`` estimate, is not skewed by pinned or service messages.
+    Falls back to the smallest message id when the attribute is absent.
+    """
+    match = _DATA_BEFORE_RE.search(html)
+    if match:
+        try:
+            return int(match.group(1))
+        except ValueError:
+            pass
+    return _earliest_message_id(html)
+
+
 async def scrape_channel(
     client: httpx.AsyncClient,
     channel: str,
@@ -216,7 +236,7 @@ async def scrape_channel(
                 # only used for triage context; not returned as a node
                 pass
 
-        earliest = _earliest_message_id(html)
+        earliest = _page_before_cursor(html)
         if earliest is None or (before is not None and earliest >= before):
             # no further pagination possible
             break
