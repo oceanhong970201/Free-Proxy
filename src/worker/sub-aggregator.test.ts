@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { parseDocument } from "yaml";
 
 import worker, { type Env, handleImport, handleSub } from "./sub-aggregator";
-import { decodeBase64Utf8 } from "./subscription";
+import { decodeBase64Utf8, encodeBase64Utf8 } from "./subscription";
 
 interface BoundStatement {
   sql: string;
@@ -124,6 +124,21 @@ const nodes = [
     },
   },
 ];
+
+const openVpnConfig = `client
+dev tun
+proto tcp
+remote 198.51.100.10 443
+cipher AES-128-CBC
+data-ciphers AES-128-CBC
+auth SHA1
+<ca>\nca-fixture\n</ca>
+<cert>\ncert-fixture\n</cert>
+<key>\nkey-fixture\n</key>
+`;
+const openVpnUri = `openvpn://${encodeBase64Utf8(openVpnConfig)
+  .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "")}` +
+  "?username=vpn&password=vpn#Fanout%20JP";
 
 interface RenderState {
   snapshot_id: string;
@@ -262,10 +277,59 @@ describe("snapshot import", () => {
     expect(batches).toHaveLength(1);
   });
 
+  it("imports a complete native OpenVPN model", async () => {
+    const { env, batches } = fakeEnvironment({ expectedCount: 1 });
+    const response = await handleImport(snapshotRequest({
+      version: 1,
+      snapshot_id: "run-1",
+      expected_count: 1,
+      nodes: [{
+        uri: openVpnUri,
+        alive: true,
+        latency_ms: 125,
+        download_speed: 12,
+        model: {
+          proto: "openvpn",
+          host: "198.51.100.10",
+          port: 443,
+          openvpn_config: openVpnConfig,
+          vpn_transport: "tcp",
+          username: "vpn",
+          password: "vpn",
+          raw: openVpnUri,
+          alive: true,
+          latency_ms: 125,
+          download_speed: 12,
+          source: "fanout-vpngate",
+        },
+      }],
+    }), env);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ ok: true, complete: true, imported: 1 });
+    expect(batches).toHaveLength(1);
+    const incoming = JSON.parse(String(batches[0][0].args[0])) as Array<Record<string, unknown>>;
+    expect(incoming[0]).toMatchObject({
+      uri: openVpnUri,
+      model: {
+        proto: "openvpn", vpn_transport: "tcp", username: "vpn", password: "vpn",
+        openvpn_config: openVpnConfig,
+      },
+    });
+  });
+
   it("requires a matching complete model for JSON snapshots", async () => {
     for (const node of [
       { uri: trojanUri, alive: true },
       { ...nodes[0], model: { ...nodes[0].model, raw: "trojan://different@one.example:443" } },
+      {
+        uri: openVpnUri,
+        alive: true,
+        model: {
+          proto: "openvpn", host: "198.51.100.10", port: 443,
+          username: "wrong", password: "vpn", openvpn_config: openVpnConfig,
+          vpn_transport: "tcp", raw: openVpnUri, alive: true,
+        },
+      },
     ]) {
       const { env, batches } = fakeEnvironment();
       const response = await handleImport(snapshotRequest({
@@ -343,6 +407,8 @@ describe("snapshot import", () => {
       "sub-render-clash",
       "sub-render-v2",
       "sub-render-clash-v2",
+      "sub-render-v3",
+      "sub-render-clash-v3",
     ]));
     expect(deleted).not.toContain(priorKey);
   });
@@ -407,13 +473,13 @@ describe("snapshot import", () => {
       headers: {
         "X-Admin-Token": "secret",
         "Content-Type": "application/json",
-        "Content-Length": String(1024 * 1024 + 1),
+        "Content-Length": String(8 * 1024 * 1024 + 1),
       },
       body: "{}",
     });
     const response = await handleImport(request, env);
     expect(response.status).toBe(400);
-    expect(await response.json()).toMatchObject({ ok: false, error: "request body exceeds 1048576 bytes" });
+    expect(await response.json()).toMatchObject({ ok: false, error: "request body exceeds 8388608 bytes" });
     expect(batches).toHaveLength(0);
   });
 
@@ -459,8 +525,8 @@ describe("versioned subscription cache", () => {
     expect(document.toJS()).toMatchObject({
       proxies: [{ name: "node: \\q", "ws-opts": { path: "/ws?ed\\=2560" } }],
     });
-    expect(gets).toEqual(["sub-render-clash-v3:run-new:200"]);
-    expect(puts).toEqual(["sub-render-clash-v3:run-new:200"]);
+    expect(gets).toEqual(["sub-render-clash-v4:run-new:200"]);
+    expect(puts).toEqual(["sub-render-clash-v4:run-new:200"]);
   });
 
   it("isolates a late stale write under the prior snapshot cache key", async () => {
@@ -475,8 +541,8 @@ describe("versioned subscription cache", () => {
     expect(response.status).toBe(200);
     expect(response.headers.get("Content-Disposition")).toContain("sub.txt");
     expect(decodeBase64Utf8(await response.text())).toBe(newUri);
-    expect(gets).toEqual(["sub-render-v3:run-new:200"]);
-    expect(puts).toEqual(["sub-render-v3:run-new:200"]);
+    expect(gets).toEqual(["sub-render-v4:run-new:200"]);
+    expect(puts).toEqual(["sub-render-v4:run-new:200"]);
     expect(gets).not.toContain(oldKey);
   });
 
@@ -489,8 +555,8 @@ describe("versioned subscription cache", () => {
     await Promise.all(pending);
     expect(response.status).toBe(200);
     expect(decodeBase64Utf8(await response.text())).toBe(newUri);
-    expect(gets).toEqual(["sub-render-v3:run-old:100", "sub-render-v3:run-new:200"]);
-    expect(puts).toEqual(["sub-render-v3:run-new:200"]);
+    expect(gets).toEqual(["sub-render-v4:run-old:100", "sub-render-v4:run-new:200"]);
+    expect(puts).toEqual(["sub-render-v4:run-new:200"]);
   });
 
   it("retries when import_state changes after rendering but before the response", async () => {
@@ -502,8 +568,8 @@ describe("versioned subscription cache", () => {
     await Promise.all(pending);
     expect(response.status).toBe(200);
     expect(decodeBase64Utf8(await response.text())).toBe(newUri);
-    expect(gets).toEqual(["sub-render-v3:run-old:100", "sub-render-v3:run-new:200"]);
-    expect(puts).toEqual(["sub-render-v3:run-new:200"]);
+    expect(gets).toEqual(["sub-render-v4:run-old:100", "sub-render-v4:run-new:200"]);
+    expect(puts).toEqual(["sub-render-v4:run-new:200"]);
   });
 });
 

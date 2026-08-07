@@ -2,6 +2,22 @@ import { stringify } from "yaml";
 
 export type ClashProxy = Record<string, unknown> & { name: string };
 
+const OPENVPN_CIPHERS = new Set([
+  "AES-128-GCM",
+  "AES-256-GCM",
+  "AES-128-CBC",
+  "AES-256-CBC",
+  "CHACHA20-POLY1305",
+]);
+const OPENVPN_AUTH = new Set(["MD5", "SHA1", "SHA256", "SHA384", "SHA512"]);
+const OPENVPN_REJECTED_DIRECTIVES = new Set([
+  "askpass", "auth-user-pass", "auth-user-pass-verify", "cd", "chroot",
+  "client-connect", "client-disconnect", "config", "daemon", "down", "down-pre",
+  "engine", "env", "ipchange", "learn-address", "log", "log-append", "management",
+  "plugin", "route-pre-down", "script-security", "setenv", "status", "syslog",
+  "tls-verify", "up", "up-delay", "up-restart", "writepid",
+]);
+
 function decodeComponent(value: string): string {
   try {
     return decodeURIComponent(value);
@@ -52,6 +68,143 @@ export function encodeBase64Utf8(value: string): string {
 function displayName(fragment: string, fallback: string): string {
   const decoded = decodeComponent(fragment);
   return decoded.trim() || fallback;
+}
+
+function parseOpenVpn(uri: string): ClashProxy {
+  const match = uri.match(/^openvpn:\/\/([^?#]+)(?:\?([^#]*))?(?:#(.*))?$/is);
+  if (!match) throw new Error("invalid OpenVPN URI");
+  const config = decodeBase64Utf8(match[1]).replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n");
+  if (!config || new TextEncoder().encode(config).byteLength > 256 * 1024 || config.includes("\0")) {
+    throw new Error("OpenVPN config is empty or oversized");
+  }
+
+  const blocks = new Map<string, string>();
+  const directives = new Map<string, string[]>();
+  let blockName: string | null = null;
+  let blockLines: string[] = [];
+  let sawClient = false;
+  for (const rawLine of config.split("\n")) {
+    const line = rawLine.trim();
+    if (blockName !== null) {
+      if (line.toLowerCase() === `</${blockName}>`) {
+        if (blocks.has(blockName)) throw new Error(`repeated OpenVPN inline block: ${blockName}`);
+        blocks.set(blockName, blockLines.join("\n").trim());
+        blockName = null;
+        blockLines = [];
+      } else {
+        blockLines.push(rawLine);
+      }
+      continue;
+    }
+    if (!line || line.startsWith("#") || line.startsWith(";")) continue;
+    const block = line.match(/^<([A-Za-z0-9-]+)>$/);
+    if (block) {
+      blockName = block[1].toLowerCase();
+      blockLines = [];
+      continue;
+    }
+    const normalized = line.startsWith("--") ? line.slice(2) : line;
+    const separator = normalized.search(/\s/);
+    const name = (separator < 0 ? normalized : normalized.slice(0, separator)).toLowerCase();
+    const value = separator < 0 ? "" : normalized.slice(separator).trim();
+    if (OPENVPN_REJECTED_DIRECTIVES.has(name) || name.startsWith("management-")) {
+      throw new Error(`unsafe OpenVPN directive: ${name}`);
+    }
+    sawClient ||= name === "client";
+    directives.set(name, [...(directives.get(name) || []), value]);
+  }
+  if (blockName !== null) throw new Error(`unclosed OpenVPN inline block: ${blockName}`);
+  if (!sawClient) throw new Error("OpenVPN config requires client mode");
+
+  const remotes = directives.get("remote") || [];
+  if (remotes.length !== 1) throw new Error("OpenVPN requires exactly one remote endpoint");
+  const remote = remotes[0].match(/^(\S+)\s+(\d+)(?:\s+(\S+))?$/);
+  if (!remote) throw new Error("invalid OpenVPN remote endpoint");
+  const server = stripIpv6Brackets(remote[1]);
+  const port = requiredPort(remote[2]);
+  const last = (name: string, fallback = ""): string => {
+    const values = directives.get(name);
+    return values?.[values.length - 1] || fallback;
+  };
+  const rawProto = (remote[3] || last("proto", "udp")).toLowerCase();
+  const proto = rawProto.startsWith("tcp") ? "tcp" : rawProto.startsWith("udp") ? "udp" : "";
+  if (!proto) throw new Error(`unsupported OpenVPN transport: ${rawProto}`);
+
+  const ca = blocks.get("ca") || "";
+  const cert = blocks.get("cert") || "";
+  const key = blocks.get("key") || "";
+  const query = new URLSearchParams(match[2] || "");
+  const username = query.get("username") || "";
+  const password = query.get("password") || "";
+  if (!ca) throw new Error("OpenVPN requires an inline CA certificate");
+  if (Boolean(cert) !== Boolean(key)) throw new Error("OpenVPN inline certificate and key must be provided together");
+  if (Boolean(username) !== Boolean(password)) throw new Error("OpenVPN username and password must be provided together");
+  if (!cert && !username) throw new Error("OpenVPN requires certificate or user authentication");
+
+  const normalizeCipher = (value: string): string => {
+    const normalized = value.toUpperCase() === "AES-CBC" ? "AES-128-CBC" : value.toUpperCase();
+    if (!OPENVPN_CIPHERS.has(normalized)) throw new Error(`unsupported OpenVPN cipher: ${normalized}`);
+    return normalized;
+  };
+  const cipher = normalizeCipher(last("cipher", "AES-128-GCM"));
+  const rawDataCiphers = last("data-ciphers");
+  const dataCiphers = rawDataCiphers
+    ? rawDataCiphers.split(/[:,]/).map((value) => normalizeCipher(value.trim())).filter(Boolean)
+    : [cipher];
+  if (dataCiphers.length === 0) throw new Error("OpenVPN data-ciphers is empty");
+  const fallback = normalizeCipher(last("data-ciphers-fallback", cipher));
+  const auth = last("auth", "SHA256").toUpperCase().replace(/-/g, "");
+  if (!OPENVPN_AUTH.has(auth)) throw new Error(`unsupported OpenVPN auth: ${auth}`);
+
+  const proxy: ClashProxy = {
+    name: displayName(match[3] || "", `openvpn-${server}:${port}`),
+    type: "openvpn",
+    server,
+    port,
+    proto,
+    ca,
+    cipher,
+    "data-ciphers": dataCiphers,
+    "data-ciphers-fallback": fallback,
+    auth,
+    "handshake-timeout": 20,
+    udp: true,
+  };
+  if (cert && key) {
+    proxy.cert = cert;
+    proxy.key = key;
+  }
+  if (username && password) {
+    proxy.username = username;
+    proxy.password = password;
+  }
+  for (const block of ["tls-auth", "tls-crypt", "tls-crypt-v2"]) {
+    const value = blocks.get(block);
+    if (value) proxy[block] = value;
+  }
+  const keyDirection = last("key-direction");
+  if (keyDirection) {
+    if (keyDirection !== "0" && keyDirection !== "1") throw new Error("OpenVPN key-direction must be 0 or 1");
+    proxy["key-direction"] = keyDirection;
+  }
+  const compLzo = last("comp-lzo").toLowerCase();
+  if (compLzo) {
+    if (!new Set(["yes", "no", "adaptive"]).has(compLzo)) throw new Error(`unsupported OpenVPN comp-lzo: ${compLzo}`);
+    proxy["comp-lzo"] = compLzo;
+  }
+  for (const [source, target] of [
+    ["ping", "ping"],
+    ["ping-restart", "ping-restart"],
+    ["handshake-timeout", "handshake-timeout"],
+    ["tun-mtu", "mtu"],
+  ]) {
+    const value = last(source);
+    if (!value) continue;
+    const parsed = Number(value);
+    if (!Number.isSafeInteger(parsed) || parsed <= 0) throw new Error(`OpenVPN ${source} must be a positive integer`);
+    proxy[target] = parsed;
+  }
+  return proxy;
 }
 
 function applyTransport(
@@ -486,6 +639,7 @@ export function uriToClashProxy(uri: string, index = 0): ClashProxy | null {
     const match = uri.match(/^([a-z0-9]+):\/\//i);
     if (!match) return null;
     const protocol = match[1].toLowerCase();
+    if (protocol === "openvpn") return parseOpenVpn(uri);
     if (protocol === "vmess") return parseVmess(uri, index);
     if (protocol === "vless" || protocol === "trojan") return parseVlessOrTrojan(uri, protocol);
     if (protocol === "ss") return parseSs(uri);

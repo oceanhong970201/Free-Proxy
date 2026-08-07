@@ -37,10 +37,13 @@ interface HealthSnapshotRow extends ImportStateRow {
 }
 
 const CACHE_KEY_PREFIXES = {
-  base64: "sub-render-v3",
-  clash: "sub-render-clash-v3",
+  base64: "sub-render-v4",
+  clash: "sub-render-clash-v4",
 } as const;
-const LEGACY_CACHE_KEYS = ["sub-render", "sub-render-clash", "sub-render-v2", "sub-render-clash-v2"];
+const LEGACY_CACHE_KEYS = [
+  "sub-render", "sub-render-clash", "sub-render-v2", "sub-render-clash-v2",
+  "sub-render-v3", "sub-render-clash-v3",
+];
 const CACHE_TTL_SECONDS = 60;
 const MAX_SNAPSHOT_READ_ATTEMPTS = 3;
 const DEFAULT_HEALTH_MAX_AGE_SECONDS = 8 * 60 * 60;
@@ -48,7 +51,7 @@ const DEFAULT_HEALTH_MAX_AGE_SECONDS = 8 * 60 * 60;
 // boundary here also places a predictable upper bound on the JSON1 upsert
 // payload and on subscription rendering work.
 const MAX_IMPORT_NODES = 100;
-const MAX_IMPORT_BODY_BYTES = 1024 * 1024;
+const MAX_IMPORT_BODY_BYTES = 8 * 1024 * 1024;
 const MAX_URI_LENGTH = 16_384;
 
 // One set-based statement persists every incoming node.  In particular, do
@@ -469,9 +472,10 @@ function validateProxyModel(value: unknown, uri: string, index?: number): Record
     throw new Error("model.port must be an integer between 1 and 65535");
   }
   const optionalStrings = [
-    "uuid", "password", "method", "sni", "net", "security", "path", "host_header", "flow", "fp", "alpn",
+    "uuid", "username", "password", "method", "sni", "net", "security", "path", "host_header", "flow", "fp", "alpn",
     "pbk", "sid", "country", "source", "content_hash", "name", "transport_mode", "packet_encoding", "protocol",
     "protocol_param", "obfs", "obfs_param", "spider_x", "congestion_control", "udp_relay_mode",
+    "openvpn_config", "vpn_transport",
   ];
   for (const field of optionalStrings) {
     if (model[field] !== undefined && model[field] !== null && typeof model[field] !== "string") {
@@ -487,12 +491,29 @@ function validateProxyModel(value: unknown, uri: string, index?: number): Record
       (typeof model.alter_id !== "number" || !Number.isSafeInteger(model.alter_id) || model.alter_id < 0)) {
     throw new Error("model.alter_id must be a non-negative integer or null");
   }
+  if (model.proto === "openvpn") {
+    if (typeof model.openvpn_config !== "string" || !model.openvpn_config.trim()) {
+      throw new Error("model.openvpn_config must contain the complete profile");
+    }
+    if (model.vpn_transport !== "tcp" && model.vpn_transport !== "udp") {
+      throw new Error("model.vpn_transport must be tcp or udp");
+    }
+  } else if (model.openvpn_config != null || model.vpn_transport != null) {
+    throw new Error("OpenVPN model fields are only valid for openvpn nodes");
+  }
   const rendered = uriToClashProxy(uri);
   const location = index === undefined ? "" : ` at index ${index}`;
   if (!rendered) throw new Error(`model URI${location} is unsupported, malformed, or not representable in Clash`);
   if (String(rendered.type) !== model.proto || String(rendered.server).toLowerCase() !== model.host.toLowerCase() ||
       Number(rendered.port) !== model.port) {
     throw new Error(`model connection${location} does not match uri`);
+  }
+  if (model.proto === "openvpn" && (
+    rendered.proto !== model.vpn_transport ||
+    (rendered.username ?? null) !== (model.username ?? null) ||
+    (rendered.password ?? null) !== (model.password ?? null)
+  )) {
+    throw new Error(`model OpenVPN transport or credentials${location} do not match uri`);
   }
   return model;
 }

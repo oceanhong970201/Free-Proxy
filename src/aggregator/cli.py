@@ -877,7 +877,18 @@ def _verify_logic(max_runtime: int | None = None) -> dict:
             n.latency_ms = None
             n.download_speed = None
         console.print("[cyan]running TCP pre-filter...")
-        reachable = tcp_prefilter.run(all_proxies)
+        openvpn_endpoints = {
+            f"{proxy.get('server')}:{proxy.get('port')}"
+            for proxy in all_proxies
+            if proxy.get("type") == "openvpn"
+        }
+        prefilter_proxies = [
+            proxy for proxy in all_proxies if proxy.get("type") != "openvpn"
+        ]
+        reachable = tcp_prefilter.run(prefilter_proxies)
+        # OpenVPN may use UDP and therefore cannot be screened with a TCP SYN.
+        # Its protocol handshake is exercised by the pinned Mihomo verifier.
+        reachable.update(openvpn_endpoints)
         if not reachable:
             summary = {
                 "completed": False,
@@ -1034,7 +1045,7 @@ def _verify_logic(max_runtime: int | None = None) -> dict:
     # TCP-unreachable endpoints are known dead; reachable but untested remain None.
     for n in nodes:
         if n.raw in unsupported_uris:
-            n.alive = None if n.proto == "openvpn" else False
+            n.alive = False
             n.latency_ms = None
             n.download_speed = None
             continue

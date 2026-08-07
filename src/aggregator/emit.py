@@ -26,6 +26,14 @@ PIPELINE_STATUS_SCHEMA_VERSION = 1
 
 _TLS_DEFAULT_PROTOCOLS = {"trojan", "tuic", "hysteria2", "juicity", "anytls"}
 _SS_METHOD_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
+_OPENVPN_CIPHERS = {
+    "AES-128-GCM",
+    "AES-256-GCM",
+    "AES-128-CBC",
+    "AES-256-CBC",
+    "CHACHA20-POLY1305",
+}
+_OPENVPN_AUTH = {"MD5", "SHA1", "SHA256", "SHA384", "SHA512"}
 
 
 class UnsupportedOutbound(ValueError):
@@ -183,22 +191,9 @@ def _pipeline_status_document(
         raise InvalidPipelineStatus(
             "verify unverified count does not match live snapshot"
         )
-    unsupported = _count(
-        verify_summary.get("unsupported_for_verifier", 0),
-        "unsupported_for_verifier",
-    )
-    excluded_openvpn = [
-        node
-        for node in all_nodes
-        if node.alive is None and node.proto.lower() == "openvpn"
-    ]
-    if len(excluded_openvpn) != snapshot_unverified:
+    if snapshot_unverified:
         raise InvalidPipelineStatus(
             "healthy public snapshot contains unverified publishable nodes"
-        )
-    if len(excluded_openvpn) > unsupported:
-        raise InvalidPipelineStatus(
-            "verify unsupported count does not cover excluded OpenVPN nodes"
         )
 
     status_nodes = [node for node in all_nodes if node.alive is not None]
@@ -435,6 +430,150 @@ def _validate_credentials(node: ProxyNode) -> None:
             )
 
 
+def _openvpn_clash_proxy(node: ProxyNode) -> dict:
+    """Translate the portable inline-profile subset into Mihomo fields."""
+
+    config = node.openvpn_config or ""
+    blocks: dict[str, str] = {}
+    directives: dict[str, list[str]] = {}
+    block_name: str | None = None
+    block_lines: list[str] = []
+    for raw_line in config.splitlines():
+        line = raw_line.strip()
+        if block_name is not None:
+            if line.lower() == f"</{block_name}>":
+                if block_name in blocks:
+                    raise UnsupportedOutbound(
+                        f"OpenVPN profile repeats inline block: {block_name}"
+                    )
+                blocks[block_name] = "\n".join(block_lines).strip()
+                block_name = None
+                block_lines = []
+            else:
+                block_lines.append(raw_line)
+            continue
+        if not line or line.startswith(("#", ";")):
+            continue
+        match = re.fullmatch(r"<([A-Za-z0-9-]+)>", line)
+        if match:
+            block_name = match.group(1).lower()
+            block_lines = []
+            continue
+        directive, _, value = line.removeprefix("--").partition(" ")
+        directives.setdefault(directive.lower(), []).append(value.strip())
+
+    if block_name is not None:
+        raise UnsupportedOutbound(f"OpenVPN inline block is not closed: {block_name}")
+
+    remotes = directives.get("remote", [])
+    if len(remotes) != 1:
+        raise UnsupportedOutbound("OpenVPN requires exactly one remote endpoint")
+
+    ca = blocks.get("ca", "")
+    cert = blocks.get("cert", "")
+    key = blocks.get("key", "")
+    if not ca:
+        raise UnsupportedOutbound("OpenVPN requires an inline CA certificate")
+    if bool(cert) != bool(key):
+        raise UnsupportedOutbound(
+            "OpenVPN inline certificate and key must be provided together"
+        )
+    if bool(node.username) != bool(node.password):
+        raise UnsupportedOutbound(
+            "OpenVPN username and password must be provided together"
+        )
+    if not cert and not node.username:
+        raise UnsupportedOutbound("OpenVPN requires certificate or user authentication")
+
+    def last(name: str, default: str = "") -> str:
+        values = directives.get(name, [])
+        return values[-1] if values else default
+
+    cipher = last("cipher", "AES-128-GCM").upper()
+    if cipher == "AES-CBC":
+        cipher = "AES-128-CBC"
+    if cipher not in _OPENVPN_CIPHERS:
+        raise UnsupportedOutbound(f"unsupported OpenVPN cipher: {cipher}")
+
+    raw_data_ciphers = last("data-ciphers")
+    data_ciphers = [
+        value.strip().upper()
+        for value in re.split(r"[:,]", raw_data_ciphers)
+        if value.strip()
+    ] or [cipher]
+    data_ciphers = [
+        "AES-128-CBC" if value == "AES-CBC" else value for value in data_ciphers
+    ]
+    unsupported_ciphers = [
+        value for value in data_ciphers if value not in _OPENVPN_CIPHERS
+    ]
+    if unsupported_ciphers:
+        raise UnsupportedOutbound(
+            f"unsupported OpenVPN data cipher: {unsupported_ciphers[0]}"
+        )
+
+    fallback = last("data-ciphers-fallback", cipher).upper()
+    if fallback == "AES-CBC":
+        fallback = "AES-128-CBC"
+    if fallback not in _OPENVPN_CIPHERS:
+        raise UnsupportedOutbound(f"unsupported OpenVPN fallback cipher: {fallback}")
+
+    auth = last("auth", "SHA256").upper().replace("-", "")
+    if auth not in _OPENVPN_AUTH:
+        raise UnsupportedOutbound(f"unsupported OpenVPN auth: {auth}")
+
+    output: dict = {
+        "name": _base_name(node),
+        "type": "openvpn",
+        "server": node.host,
+        "port": node.port,
+        "proto": node.vpn_transport,
+        "ca": ca,
+        "cipher": cipher,
+        "data-ciphers": data_ciphers,
+        "data-ciphers-fallback": fallback,
+        "auth": auth,
+        "handshake-timeout": 20,
+        "udp": True,
+    }
+    if cert and key:
+        output.update({"cert": cert, "key": key})
+    if node.username and node.password:
+        output.update({"username": node.username, "password": node.password})
+
+    for block in ("tls-auth", "tls-crypt", "tls-crypt-v2"):
+        if blocks.get(block):
+            output[block] = blocks[block]
+    key_direction = last("key-direction")
+    if key_direction:
+        if key_direction not in {"0", "1"}:
+            raise UnsupportedOutbound("OpenVPN key-direction must be 0 or 1")
+        output["key-direction"] = key_direction
+    comp_lzo = last("comp-lzo").lower()
+    if comp_lzo:
+        if comp_lzo not in {"yes", "no", "adaptive"}:
+            raise UnsupportedOutbound(f"unsupported OpenVPN comp-lzo: {comp_lzo}")
+        output["comp-lzo"] = comp_lzo
+    for source, target in (
+        ("ping", "ping"),
+        ("ping-restart", "ping-restart"),
+        ("handshake-timeout", "handshake-timeout"),
+        ("tun-mtu", "mtu"),
+    ):
+        value = last(source)
+        if value:
+            try:
+                parsed = int(value)
+            except ValueError as exc:
+                raise UnsupportedOutbound(
+                    f"OpenVPN {source} must be an integer"
+                ) from exc
+            if parsed <= 0:
+                raise UnsupportedOutbound(f"OpenVPN {source} must be positive")
+            output[target] = parsed
+    return output
+
+
 def _add_clash_transport(output: dict, node: ProxyNode) -> None:
     net = (node.net or "").lower()
     if node.proto not in {"vmess", "vless", "trojan"}:
@@ -498,9 +637,13 @@ def to_clash_dict(node: ProxyNode) -> dict:
         "hysteria2",
         "tuic",
         "anytls",
+        "openvpn",
     }:
         raise UnsupportedOutbound(f"unsupported Clash protocol: {proto}")
     _validate_credentials(node)
+
+    if proto == "openvpn":
+        return _openvpn_clash_proxy(node)
 
     output: dict = {
         "name": _base_name(node),
@@ -741,7 +884,7 @@ def emit_clash(nodes: list[ProxyNode]) -> dict:
 def clash_skip_reason(node: ProxyNode) -> str | None:
     """Return why the pinned Clash verifier cannot represent this node."""
 
-    if node.proto.lower() in {"juicity", "openvpn"}:
+    if node.proto.lower() == "juicity":
         return f"protocol:{node.proto.lower()}"
     return None
 
@@ -772,8 +915,6 @@ def emit_singbox(nodes: list[ProxyNode]) -> dict:
 def emit_v2ray_b64(nodes: list[ProxyNode]) -> str:
     uris: list[str] = []
     for node in nodes:
-        if node.proto.lower() == "openvpn":
-            continue
         validate_proxy_node(node)
         if node.raw:
             validate_node_raw(node)

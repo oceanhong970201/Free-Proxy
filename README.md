@@ -29,29 +29,26 @@ python src\aggregator\cli.py emit
 
 `fanout-vpngate` imports the complete OpenVPN inventory from the same VPN Gate
 CSV source used by Fanout. Each node keeps its full `.ovpn` profile in
-`ProxyNode.openvpn_config`; no Fanout runtime setting is changed. OpenVPN nodes
-remain unverified by the Mihomo verifier and are excluded from Clash, sing-box,
-and V2Ray subscription output rather than being mislabeled as another protocol.
+`ProxyNode.openvpn_config`; no Fanout runtime setting is changed. The verifier
+uses `clash-speedtest v1.8.8` rebuilt against Mihomo `v1.19.29`, so supported
+profiles are tested and emitted as native Clash `type: openvpn` proxies. That
+verifier build includes Mihomo's `with_gvisor` tag, which OpenVPN needs for its
+userspace TUN stack. The Worker decodes the complete `openvpn://` profile into
+the same Mihomo fields.
 
-Clash Verge can use the OpenVPN exits through Fanout's loopback-only SOCKS5
-bridge. Exit Clash Verge before syncing so it reloads both enhancement files on
-the next start:
+Native OpenVPN output requires Clash Verge Rev `v2.5.2` (Mihomo `v1.19.29`) or
+newer. Refreshing the normal Worker subscription is sufficient; Fanout does not
+need to run locally and no SOCKS5 conversion is involved.
+
+The loopback-only Fanout SOCKS5 bridge remains available only for older Mihomo
+cores. Exit Clash Verge before running the compatibility sync:
 
 ```powershell
 python tools\sync_fanout_clash_verge.py
 ```
 
-The command creates or updates a dedicated `Free-Proxy + Fanout` remote profile,
-selects it, downloads the normal proxies from the deployed Worker `/sub` URL,
-and adds the currently `up` Fanout slots as a local `Fanout OpenVPN` group.
-Refreshing that profile updates the Worker portion while retaining the local
-enhancement. The Worker response itself contains only its publishable Mihomo
-snapshot; the Fanout entries exist in the Clash Verge profile on this machine.
-The complete local overlay is verified through Clash Verge's bundled Mihomo
-core. Fanout settings are not changed. Runtime SOCKS5 credentials remain under
-the local Clash Verge data directory and are never written to the repository or
-public subscription artifacts. The command also creates a local backup, patch,
-verification record, and tested rollback script.
+That compatibility command creates a dedicated local profile and does not
+change Fanout settings. It is not part of the native Worker subscription path.
 
 發布 Worker snapshot 前設定：
 

@@ -1,0 +1,22 @@
+diff --git a/speedtester/speedtester.go b/speedtester/speedtester.go
+index a117cb6..280eaad 100644
+--- a/speedtester/speedtester.go
++++ b/speedtester/speedtester.go
+@@ -218 +218 @@ func (st *SpeedTester) LoadProxies() (map[string]*CProxy, error) {
+-			pd, err := provider.ParseProxyProvider(name, config)
++			pd, err := provider.ParseProxyProvider(name, config, nil)
+@@ -256 +256,2 @@ func (st *SpeedTester) LoadProxies() (map[string]*CProxy, error) {
+-				constant.WireGuard, constant.Tuic, constant.Ssh, constant.Mieru, constant.AnyTLS, constant.Sudoku:
++				constant.WireGuard, constant.Tuic, constant.Ssh, constant.Mieru, constant.AnyTLS, constant.Sudoku,
++				constant.OpenVPN:
+@@ -439,0 +441,10 @@ func (st *SpeedTester) testProxy(name string, proxy *CProxy) *Result {
++	if proxy.Type() == constant.OpenVPN {
++		client := st.createClient(proxy, 20*time.Second)
++		req, err := http.NewRequest(http.MethodHead, st.downloadURL, nil)
++		if err == nil {
++			if resp, requestErr := client.Do(req); requestErr == nil {
++				resp.Body.Close()
++			}
++		}
++		client.CloseIdleConnections()
++	}

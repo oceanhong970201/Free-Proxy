@@ -152,6 +152,19 @@ remote 198.51.100.10 443
 fixture
 -----END CERTIFICATE-----
 </ca>
+<cert>
+-----BEGIN CERTIFICATE-----
+client-fixture
+-----END CERTIFICATE-----
+</cert>
+<key>
+-----BEGIN PRIVATE KEY-----
+key-fixture
+-----END PRIVATE KEY-----
+</key>
+cipher AES-128-CBC
+data-ciphers AES-256-GCM:AES-128-CBC
+auth SHA1
 """
     encoded = base64.b64encode(config.encode()).decode()
     source = (
@@ -169,18 +182,42 @@ fixture
     assert node.host == "198.51.100.10"
     assert node.port == 443
     assert node.vpn_transport == "tcp"
+    assert node.username == "vpn"
+    assert node.password == "vpn"
     assert node.country == "Japan"
     assert node.openvpn_config == config
     assert node.raw.startswith("openvpn://")
     reparsed = parse_uri(node.raw)
     assert reparsed is not None
     assert reparsed.openvpn_config == config
+    assert reparsed.username == "vpn"
+    assert reparsed.password == "vpn"
     assert reparsed.dedup_key() == node.dedup_key()
 
-    assert clash_skip_reason(node) == "protocol:openvpn"
-    assert emit_clash([node]) == {"proxies": []}
+    assert clash_skip_reason(node) is None
+    clash = emit_clash([node])
+    assert clash["proxies"] == [
+        {
+            "name": "fanout-JP-vpn-fixture",
+            "type": "openvpn",
+            "server": "198.51.100.10",
+            "port": 443,
+            "proto": "tcp",
+            "ca": "-----BEGIN CERTIFICATE-----\nfixture\n-----END CERTIFICATE-----",
+            "cert": "-----BEGIN CERTIFICATE-----\nclient-fixture\n-----END CERTIFICATE-----",
+            "key": "-----BEGIN PRIVATE KEY-----\nkey-fixture\n-----END PRIVATE KEY-----",
+            "cipher": "AES-128-CBC",
+            "data-ciphers": ["AES-256-GCM", "AES-128-CBC"],
+            "data-ciphers-fallback": "AES-128-CBC",
+            "auth": "SHA1",
+            "username": "vpn",
+            "password": "vpn",
+            "handshake-timeout": 20,
+            "udp": True,
+        }
+    ]
     assert emit_singbox([node]) == {"outbounds": []}
-    assert emit_v2ray_b64([node]) == ""
+    assert base64.b64decode(emit_v2ray_b64([node])).decode() == node.raw
 
 
 def test_fanout_vpngate_csv_rejects_unsafe_openvpn_profiles() -> None:

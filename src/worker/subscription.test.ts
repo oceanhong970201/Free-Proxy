@@ -12,6 +12,17 @@ function urlSafeBase64(value: string): string {
   return encodeBase64Utf8(value).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
+function openVpnUri(
+  config: string,
+  name = "fanout-openvpn",
+  credentials?: { username: string; password: string },
+): string {
+  const query = credentials
+    ? `?username=${encodeURIComponent(credentials.username)}&password=${encodeURIComponent(credentials.password)}`
+    : "";
+  return `openvpn://${urlSafeBase64(config)}${query}#${encodeURIComponent(name)}`;
+}
+
 describe("base64 helpers", () => {
   it("round-trips UTF-8 and accepts unpadded URL-safe input", () => {
     const value = "vmess://example-\u53f0\u7063";
@@ -24,6 +35,81 @@ describe("base64 helpers", () => {
 });
 
 describe("URI to Clash conversion", () => {
+  it("maps a certificate-authenticated AES-128-CBC OpenVPN profile", () => {
+    const config = `client
+dev tun
+proto tcp
+remote 198.51.100.10 443
+cipher AES-128-CBC
+data-ciphers AES-256-GCM:AES-128-CBC
+auth SHA1
+<ca>
+-----BEGIN CERTIFICATE-----
+ca-fixture
+-----END CERTIFICATE-----
+</ca>
+<cert>
+-----BEGIN CERTIFICATE-----
+cert-fixture
+-----END CERTIFICATE-----
+</cert>
+<key>
+-----BEGIN PRIVATE KEY-----
+key-fixture
+-----END PRIVATE KEY-----
+</key>
+`;
+    expect(uriToClashProxy(openVpnUri(config, "Fanout JP"))).toMatchObject({
+      name: "Fanout JP",
+      type: "openvpn",
+      server: "198.51.100.10",
+      port: 443,
+      proto: "tcp",
+      cipher: "AES-128-CBC",
+      "data-ciphers": ["AES-256-GCM", "AES-128-CBC"],
+      "data-ciphers-fallback": "AES-128-CBC",
+      auth: "SHA1",
+      udp: true,
+    });
+  });
+
+  it("rejects OpenVPN profiles with executable hooks or missing key material", () => {
+    const unsafe = `client
+remote 198.51.100.10 443 tcp
+script-security 2
+up payload.sh
+<ca>\nfixture\n</ca>
+<cert>\nfixture\n</cert>
+<key>\nfixture\n</key>`;
+    const incomplete = `client
+remote 198.51.100.10 443 tcp
+<ca>\nfixture\n</ca>`;
+    expect(uriToClashProxy(openVpnUri(unsafe))).toBeNull();
+    expect(uriToClashProxy(openVpnUri(incomplete))).toBeNull();
+  });
+
+  it("maps VPNGate username/password authentication without client certificates", () => {
+    const config = `client
+proto udp
+remote 198.51.100.20 1194
+cipher AES-128-CBC
+auth SHA1
+<ca>\nca-fixture\n</ca>`;
+    expect(uriToClashProxy(openVpnUri(config, "Fanout UDP", {
+      username: "vpn",
+      password: "vpn",
+    }))).toMatchObject({
+      name: "Fanout UDP",
+      type: "openvpn",
+      server: "198.51.100.20",
+      port: 1194,
+      proto: "udp",
+      username: "vpn",
+      password: "vpn",
+      "handshake-timeout": 20,
+    });
+  });
+
   it("places VLESS WebSocket and Reality settings in Clash-native fields", () => {
     const proxy = uriToClashProxy(
       "vless://user-id@example.com:443?security=reality&type=ws&path=%2Fws%3Fed%3D2048&host=edge.example&" +

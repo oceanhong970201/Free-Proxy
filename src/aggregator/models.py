@@ -45,6 +45,7 @@ class ProxyNode(BaseModel):
     port: int
     uuid: str | None = None
     alter_id: int | None = None  # VMess alterId; 0 is the modern default
+    username: str | None = None
     password: str | None = None
     method: str | None = None  # SS/SSR cipher or VMess security
     sni: str | None = None
@@ -294,8 +295,12 @@ def validate_proxy_node(node: ProxyNode) -> ProxyNode:
             raise ValueError("OpenVPN requires a complete client config")
         if node.vpn_transport not in {"tcp", "udp"}:
             raise ValueError("OpenVPN transport must be tcp or udp")
+        if bool(node.username) != bool(node.password):
+            raise ValueError("OpenVPN username and password must be provided together")
     elif node.openvpn_config is not None or node.vpn_transport is not None:
         raise ValueError(f"OpenVPN fields are not valid for {proto}")
+    elif node.username is not None:
+        raise ValueError(f"username is not valid for {proto}")
     return node
 
 

@@ -24,6 +24,7 @@ _TLS_DEFAULT_PROTOCOLS = {"trojan", "tuic", "hysteria2", "juicity"}
 
 _OPENVPN_REJECTED_DIRECTIVES = {
     "askpass",
+    "auth-user-pass",
     "auth-user-pass-verify",
     "cd",
     "chroot",
@@ -165,6 +166,8 @@ def parse_fanout_vpngate_csv(text: str) -> list[ProxyNode]:
                 port=port,
                 openvpn_config=config,
                 vpn_transport=transport,
+                username="vpn",
+                password="vpn",
                 raw="",
                 name=f"fanout-{country_code}-{hostname}",
                 country=(record.get("CountryLong") or "").strip() or None,
@@ -296,8 +299,12 @@ def node_to_uri(node: ProxyNode) -> str:
 
     if proto == "openvpn":
         encoded = _b64encode_urlsafe(node.openvpn_config or "")
+        query = {}
+        if node.username and node.password:
+            query = {"username": node.username, "password": node.password}
+        query_string = f"?{urlencode(query)}" if query else ""
         fragment = f"#{quote(name, safe='')}" if name else ""
-        return f"openvpn://{encoded}{fragment}"
+        return f"openvpn://{encoded}{query_string}{fragment}"
 
     if proto == "vmess":
         tls_enabled = _tls_enabled(node)
@@ -665,19 +672,22 @@ def parse_uri(uri: str) -> ProxyNode | None:
     lowered = uri.lower()
     node: ProxyNode | None = None
     if lowered.startswith("openvpn://"):
-        body = uri.split("://", 1)[1].split("#", 1)[0]
+        body = uri.split("://", 1)[1].split("?", 1)[0].split("#", 1)[0]
         config = _b64decode_loose(unquote(body))
         try:
             config, host, port, transport = _sanitize_openvpn_config(config)
         except (TypeError, ValueError):
             return None
         parsed = urlparse(uri)
+        query = parse_qs(parsed.query)
         node = ProxyNode(
             proto="openvpn",
             host=host,
             port=port,
             openvpn_config=config,
             vpn_transport=transport,
+            username=_query_value(query, "username"),
+            password=_query_value(query, "password"),
             raw=uri,
             name=unquote(parsed.fragment) if parsed.fragment else None,
         )
