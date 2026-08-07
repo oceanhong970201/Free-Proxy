@@ -109,7 +109,10 @@ def test_build_profile_plan_registers_dedicated_remote_profile(tmp_path: Path) -
     proxy = clash_proxy(exit_row())
 
     plan, aggregate_count = build_profile_plan(
-        tmp_path, subscription, "https://example.test/clash.yaml", [proxy]
+        tmp_path,
+        subscription.read_bytes(),
+        "https://example.test/clash.yaml",
+        [proxy],
     )
 
     profiles_document = yaml.safe_load(plan[tmp_path / "profiles.yaml"])

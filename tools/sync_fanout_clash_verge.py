@@ -25,8 +25,7 @@ MANAGED_GROUP = "Fanout OpenVPN"
 MANAGED_PREFIX = f"{MANAGED_GROUP} "
 FANOUT_PORTS = range(23000, 23008)
 SUBSCRIPTION_URL = (
-    "https://raw.githubusercontent.com/oceanhong970201/Free-Proxy/"
-    "master/output/clash.yaml"
+    "https://proxy-sub-aggregator.proxy-aggregator.workers.dev/sub?format=clash"
 )
 PROFILE_UID = "FreeProxyF01"
 PROFILE_NAME = "Free-Proxy + Fanout"
@@ -51,11 +50,19 @@ def sha256(data: bytes) -> str:
 
 
 def read_yaml(path: Path) -> dict[str, Any]:
-    value = yaml.safe_load(path.read_text(encoding="utf-8"))
+    return read_yaml_bytes(path.read_bytes(), str(path))
+
+
+def read_yaml_bytes(data: bytes, source: str) -> dict[str, Any]:
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise RuntimeError(f"YAML is not valid UTF-8: {source}") from exc
+    value = yaml.safe_load(text)
     if value is None:
         return {}
     if not isinstance(value, dict):
-        raise RuntimeError(f"expected a YAML mapping: {path}")
+        raise RuntimeError(f"expected a YAML mapping: {source}")
     return value
 
 
@@ -105,6 +112,23 @@ def fetch_exits(container: str, api_origin: str) -> list[dict[str, Any]]:
     if not isinstance(exits, list):
         raise RuntimeError("Fanout returned an invalid exits document")
     return exits
+
+
+def fetch_subscription(url: str) -> bytes:
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "application/yaml,text/yaml,text/plain",
+            "User-Agent": "Free-Proxy-Fanout-Bridge/1",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=30) as response:
+        if response.status != 200:
+            raise RuntimeError(f"subscription returned HTTP {response.status}")
+        data = response.read(10 * 1024 * 1024 + 1)
+    if not data or len(data) > 10 * 1024 * 1024:
+        raise RuntimeError("subscription response is empty or oversized")
+    return data
 
 
 def usable_exits(exits: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -170,7 +194,7 @@ def replace_managed(
 
 def build_profile_plan(
     verge_dir: Path,
-    subscription_path: Path,
+    subscription_data: bytes,
     subscription_url: str,
     proxies: list[dict[str, Any]],
 ) -> tuple[dict[Path, bytes], int]:
@@ -181,7 +205,7 @@ def build_profile_plan(
     if not isinstance(items, list):
         raise RuntimeError("Clash Verge profiles.yaml has no items list")
 
-    subscription = read_yaml(subscription_path)
+    subscription = read_yaml_bytes(subscription_data, subscription_url)
     aggregate_proxies = subscription.get("proxies")
     if not isinstance(aggregate_proxies, list) or not aggregate_proxies:
         raise RuntimeError("Free-Proxy Clash subscription has no proxies")
@@ -249,7 +273,7 @@ def build_profile_plan(
     }
     plan = {
         profiles_path: dump_yaml(document),
-        profiles_dir / f"{PROFILE_UID}.yaml": subscription_path.read_bytes(),
+        profiles_dir / f"{PROFILE_UID}.yaml": subscription_data,
         profiles_dir / f"{PROFILE_LINKS['merge']}.yaml": dump_yaml(
             {"profile": {"store-selected": True}}
         ),
@@ -487,9 +511,15 @@ def apply_bridge(args: argparse.Namespace) -> int:
     verge_dir = args.verge_dir.resolve()
     exits = usable_exits(fetch_exits(args.container, args.api_origin))
     proxies = [clash_proxy(exit_row) for exit_row in exits]
-    subscription_path = args.subscription_file.resolve()
+    if args.subscription_file is None:
+        subscription_data = fetch_subscription(args.subscription_url)
+        subscription_source = args.subscription_url
+    else:
+        subscription_path = args.subscription_file.resolve()
+        subscription_data = subscription_path.read_bytes()
+        subscription_source = str(subscription_path)
     modified, aggregate_count = build_profile_plan(
-        verge_dir, subscription_path, args.subscription_url, proxies
+        verge_dir, subscription_data, args.subscription_url, proxies
     )
     targets = list(modified)
     originals = {
@@ -526,7 +556,7 @@ def apply_bridge(args: argparse.Namespace) -> int:
         bridge_dir,
         exits,
         proxies,
-        read_yaml(subscription_path),
+        read_yaml_bytes(subscription_data, subscription_source),
     )
     verification.update(
         {
@@ -577,6 +607,7 @@ def apply_bridge(args: argparse.Namespace) -> int:
                 "profile": PROFILE_NAME,
                 "profile_uid": PROFILE_UID,
                 "subscription_url": args.subscription_url,
+                "subscription_source": subscription_source,
                 "verification": str(verification_path),
                 "rollback": str(rollback_path),
             },
@@ -591,9 +622,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--verge-dir", type=Path, default=default_verge_dir())
     parser.add_argument("--container", default="fanout-local")
     parser.add_argument("--api-origin", default="http://127.0.0.1:18899")
-    parser.add_argument(
-        "--subscription-file", type=Path, default=Path("output/clash.yaml")
-    )
+    parser.add_argument("--subscription-file", type=Path)
     parser.add_argument("--subscription-url", default=SUBSCRIPTION_URL)
     parser.add_argument(
         "--core",
