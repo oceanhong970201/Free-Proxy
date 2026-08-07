@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import base64
+import csv
+import io
 import json
 import re
 from typing import Any
@@ -14,11 +16,46 @@ from .models import ProxyNode, validate_proxy_node
 
 
 CONFIG_RE = re.compile(
-    r"(?<![\w-])((?:vmess|vless|trojan|ss|ssr|tuic|hysteria2?|hy2|juicity|anytls)://[^\s<>]+)",
+    r"(?<![\w-])((?:openvpn|vmess|vless|trojan|ss|ssr|tuic|hysteria2?|hy2|juicity|anytls)://[^\s<>]+)",
     re.IGNORECASE,
 )
 
 _TLS_DEFAULT_PROTOCOLS = {"trojan", "tuic", "hysteria2", "juicity"}
+
+_OPENVPN_REJECTED_DIRECTIVES = {
+    "askpass",
+    "auth-user-pass-verify",
+    "cd",
+    "chroot",
+    "client-connect",
+    "client-disconnect",
+    "config",
+    "daemon",
+    "down",
+    "down-pre",
+    "engine",
+    "env",
+    "ipchange",
+    "learn-address",
+    "log",
+    "log-append",
+    "management",
+    "plugin",
+    "route-pre-down",
+    "script-security",
+    "setenv",
+    "status",
+    "syslog",
+    "tls-verify",
+    "up",
+    "up-delay",
+    "up-restart",
+    "writepid",
+}
+_OPENVPN_REMOTE_RE = re.compile(
+    r"(?mi)^[ \t]*remote[ \t]+(\S+)[ \t]+(\d+)(?:[ \t]+(\S+))?"
+)
+_OPENVPN_PROTO_RE = re.compile(r"(?mi)^[ \t]*proto[ \t]+(\S+)")
 
 
 def _b64decode_loose(value: str) -> str:
@@ -31,8 +68,113 @@ def _b64decode_loose(value: str) -> str:
         return ""
 
 
+def _b64decode_strict(value: str) -> str:
+    """Decode URL-safe base64 while rejecting trailing or embedded garbage."""
+    value = value.strip().replace("-", "+").replace("_", "/")
+    if (
+        not value
+        or len(value) % 4 == 1
+        or not re.fullmatch(r"[A-Za-z0-9+/]*={0,2}", value)
+    ):
+        return ""
+    value = value.rstrip("=")
+    value += "=" * (-len(value) % 4)
+    try:
+        return base64.b64decode(value, validate=True).decode("utf-8")
+    except Exception:
+        return ""
+
+
 def _b64encode_urlsafe(value: str) -> str:
     return base64.urlsafe_b64encode(value.encode("utf-8")).decode("ascii").rstrip("=")
+
+
+def _sanitize_openvpn_config(raw: str) -> tuple[str, str, int, str]:
+    """Validate the portable OpenVPN profile subset used by Fanout."""
+
+    if not raw or len(raw.encode("utf-8")) > 256 * 1024 or "\x00" in raw:
+        raise ValueError("OpenVPN config is empty or oversized")
+    config = raw.lstrip("\ufeff").replace("\r\n", "\n").replace("\r", "\n")
+    inside_block: str | None = None
+    saw_client = False
+    saw_ca = False
+    for raw_line in config.splitlines():
+        line = raw_line.strip()
+        if inside_block:
+            if line.lower() == f"</{inside_block}>":
+                inside_block = None
+            continue
+        if not line or line.startswith(("#", ";")):
+            continue
+        if line.startswith("<") and line.endswith(">") and not line.startswith("</"):
+            inside_block = line[1:-1].strip().lower()
+            saw_ca = saw_ca or inside_block == "ca"
+            continue
+        directive = line.split(None, 1)[0].lower().removeprefix("--")
+        if directive in _OPENVPN_REJECTED_DIRECTIVES or directive.startswith(
+            "management-"
+        ):
+            raise ValueError(f"unsafe OpenVPN directive: {directive}")
+        saw_client = saw_client or directive == "client"
+    if inside_block:
+        raise ValueError(f"unclosed OpenVPN inline block: {inside_block}")
+    if not saw_client or not saw_ca:
+        raise ValueError("OpenVPN config requires client and inline CA")
+
+    remote = _OPENVPN_REMOTE_RE.search(config)
+    if not remote:
+        raise ValueError("OpenVPN config has no remote endpoint")
+    host = remote.group(1)
+    port = int(remote.group(2))
+    if not 1 <= port <= 65535:
+        raise ValueError("OpenVPN remote port is invalid")
+    proto_match = _OPENVPN_PROTO_RE.search(config)
+    raw_transport = (remote.group(3) or (proto_match.group(1) if proto_match else "udp"))
+    transport = "tcp" if raw_transport.lower().startswith("tcp") else "udp"
+    return config.rstrip() + "\n", host, port, transport
+
+
+def parse_fanout_vpngate_csv(text: str) -> list[ProxyNode]:
+    """Parse the VPN Gate CSV source used by Fanout into OpenVPN nodes."""
+
+    kept = [
+        line.removeprefix("#").rstrip("\r")
+        for line in text.splitlines()
+        if line and not line.startswith("*")
+    ]
+    if len(kept) < 2:
+        return []
+    try:
+        records = list(csv.DictReader(io.StringIO("\n".join(kept))))
+    except csv.Error:
+        return []
+
+    nodes: list[ProxyNode] = []
+    for record in records:
+        encoded = record.get("OpenVPN_ConfigData_Base64") or ""
+        hostname = (record.get("HostName") or "").strip()
+        if not encoded or not hostname:
+            continue
+        try:
+            decoded = base64.b64decode(encoded, validate=True).decode("utf-8")
+            config, host, port, transport = _sanitize_openvpn_config(decoded)
+            country_code = (record.get("CountryShort") or "XX").strip() or "XX"
+            node = ProxyNode(
+                proto="openvpn",
+                host=host,
+                port=port,
+                openvpn_config=config,
+                vpn_transport=transport,
+                raw="",
+                name=f"fanout-{country_code}-{hostname}",
+                country=(record.get("CountryLong") or "").strip() or None,
+            )
+            validate_proxy_node(node)
+            node.raw = node_to_uri(node)
+        except (TypeError, ValueError, UnicodeDecodeError):
+            continue
+        nodes.append(node)
+    return nodes
 
 
 def _host_port(host: str, port: int) -> str:
@@ -152,6 +294,11 @@ def node_to_uri(node: ProxyNode) -> str:
     host_port = _host_port(node.host or "", node.port or 0)
     name = node.name or ""
 
+    if proto == "openvpn":
+        encoded = _b64encode_urlsafe(node.openvpn_config or "")
+        fragment = f"#{quote(name, safe='')}" if name else ""
+        return f"openvpn://{encoded}{fragment}"
+
     if proto == "vmess":
         tls_enabled = _tls_enabled(node)
         vmess_net = node.net or "tcp"
@@ -259,7 +406,7 @@ def extract_uris(text: str) -> list[str]:
 
 
 def _parse_vmess(uri: str) -> ProxyNode | None:
-    raw_json = _b64decode_loose(uri[len("vmess://") :])
+    raw_json = _b64decode_strict(uri[len("vmess://") :])
     if not raw_json:
         return None
     try:
@@ -517,7 +664,24 @@ def parse_uri(uri: str) -> ProxyNode | None:
     uri = uri.strip()
     lowered = uri.lower()
     node: ProxyNode | None = None
-    if lowered.startswith("vmess://"):
+    if lowered.startswith("openvpn://"):
+        body = uri.split("://", 1)[1].split("#", 1)[0]
+        config = _b64decode_loose(unquote(body))
+        try:
+            config, host, port, transport = _sanitize_openvpn_config(config)
+        except (TypeError, ValueError):
+            return None
+        parsed = urlparse(uri)
+        node = ProxyNode(
+            proto="openvpn",
+            host=host,
+            port=port,
+            openvpn_config=config,
+            vpn_transport=transport,
+            raw=uri,
+            name=unquote(parsed.fragment) if parsed.fragment else None,
+        )
+    elif lowered.startswith("vmess://"):
         node = _parse_vmess(uri)
     elif lowered.startswith("ssr://"):
         node = _parse_ssr(uri)
@@ -947,6 +1111,8 @@ def parse_v2ray_base64(text: str) -> list[ProxyNode]:
 def parse_raw(source_format: str, text: str) -> list[ProxyNode]:
     """Dispatch a source body to the corresponding parser."""
     source_format = (source_format or "").lower()
+    if source_format in {"fanout", "vpngate", "openvpn-csv"}:
+        return parse_fanout_vpngate_csv(text)
     if source_format in {"clash", "clash.yaml", "yaml"}:
         nodes = parse_clash_yaml(text)
         known_raw = {node.raw for node in nodes}

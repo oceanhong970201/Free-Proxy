@@ -515,7 +515,7 @@ def _parse_logic() -> dict:
                      :flow,:packet_encoding,:fp,:alpn,:pbk,:sid,:spider_x,:utls,
                      :skip_cert_verify,:protocol,:protocol_param,
                      :obfs,:obfs_param,:congestion_control,:udp_relay_mode,
-                     NULL,NULL,NULL,NULL,:source,:first_seen,:last_checked,
+                     :country,NULL,NULL,NULL,:source,:first_seen,:last_checked,
                      :content_hash,:node_json,NULL)""",
                 {
                     "uri": n.raw,
@@ -550,6 +550,7 @@ def _parse_logic() -> dict:
                     "obfs_param": n.obfs_param,
                     "congestion_control": n.congestion_control,
                     "udp_relay_mode": n.udp_relay_mode,
+                    "country": n.country,
                     "source": n.source,
                     "first_seen": previous_first_seen.get(n.raw) or now,
                     "last_checked": now,
@@ -1033,7 +1034,7 @@ def _verify_logic(max_runtime: int | None = None) -> dict:
     # TCP-unreachable endpoints are known dead; reachable but untested remain None.
     for n in nodes:
         if n.raw in unsupported_uris:
-            n.alive = False
+            n.alive = None if n.proto == "openvpn" else False
             n.latency_ms = None
             n.download_speed = None
             continue

@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 SUPPORTED_PROTOCOLS = {
+    "openvpn",
     "vmess",
     "vless",
     "trojan",
@@ -39,7 +40,7 @@ class ProxyNode(BaseModel):
 
     # Connection fields. ``raw`` is retained for subscription output, but is
     # deliberately not part of the semantic connection key.
-    proto: str  # vmess|vless|trojan|ss|ssr|hysteria2|tuic|juicity
+    proto: str  # openvpn|vmess|vless|trojan|ss|ssr|hysteria2|tuic|juicity
     host: str
     port: int
     uuid: str | None = None
@@ -70,8 +71,12 @@ class ProxyNode(BaseModel):
     # TUIC / Juicity settings.
     congestion_control: str | None = None
     udp_relay_mode: str | None = None
+    # OpenVPN source nodes keep their complete client profile in the model.
+    openvpn_config: str | None = None
+    vpn_transport: str | None = None
     raw: str
     name: str | None = None
+    country: str | None = None
     # Runtime-only liveness and provenance.
     source: str | None = None
     alive: bool | None = None
@@ -98,6 +103,7 @@ class ProxyNode(BaseModel):
             "latency_ms",
             "download_speed",
             "content_hash",
+            "country",
         }
         values = self.model_dump(exclude=excluded, exclude_none=False)
         values["proto"] = (self.proto or "").lower()
@@ -146,6 +152,7 @@ def validate_proxy_node(node: ProxyNode) -> ProxyNode:
         "obfs_param",
         "congestion_control",
         "udp_relay_mode",
+        "vpn_transport",
     ):
         value = getattr(node, field_name)
         if isinstance(value, str) and not value:
@@ -282,6 +289,13 @@ def validate_proxy_node(node: ProxyNode) -> ProxyNode:
         )
     ):
         raise ValueError("ShadowsocksR requires method, password, protocol and obfs")
+    if proto == "openvpn":
+        if not (node.openvpn_config or "").strip():
+            raise ValueError("OpenVPN requires a complete client config")
+        if node.vpn_transport not in {"tcp", "udp"}:
+            raise ValueError("OpenVPN transport must be tcp or udp")
+    elif node.openvpn_config is not None or node.vpn_transport is not None:
+        raise ValueError(f"OpenVPN fields are not valid for {proto}")
     return node
 
 

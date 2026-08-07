@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import sqlite3
 from contextlib import closing
@@ -95,6 +96,43 @@ def test_parse_persists_complete_node_json(monkeypatch, tmp_path):
     assert {doc.get("path") for doc in documents} >= {"/a", "/b"}
     assert {doc.get("host_header") for doc in documents} >= {"a.example", "b.example"}
     assert any(doc.get("method") == "aes-128-gcm" for doc in documents)
+
+
+def test_parse_persists_fanout_openvpn_nodes(monkeypatch, tmp_path):
+    sources = _configure_temp_pipeline(monkeypatch, tmp_path)
+    sources[0]["format"] = "fanout"
+    config = """client
+dev tun
+proto udp
+remote 198.51.100.20 1194
+<ca>
+-----BEGIN CERTIFICATE-----
+fixture
+-----END CERTIFICATE-----
+</ca>
+"""
+    encoded = base64.b64encode(config.encode()).decode()
+    raw = (
+        "#HostName,IP,CountryLong,CountryShort,OpenVPN_ConfigData_Base64\n"
+        f"vpn-fixture,198.51.100.20,Japan,JP,{encoded}\n"
+    )
+    cli.STAGING.write_text(
+        json.dumps({"source_id": "fixture", "raw": raw}), encoding="utf-8"
+    )
+
+    summary = cli._parse_logic()
+
+    assert summary["success"] is True
+    assert summary["by_source"] == {"fixture": 1}
+    with closing(sqlite3.connect(cli.DB)) as conn:
+        proto, country, model_json = conn.execute(
+            "SELECT proto, country, node_json FROM nodes"
+        ).fetchone()
+    model = json.loads(model_json)
+    assert proto == "openvpn"
+    assert country == "Japan"
+    assert model["openvpn_config"] == config
+    assert model["vpn_transport"] == "udp"
 
 
 def test_verify_keeps_same_endpoint_credentials_independent(monkeypatch, tmp_path):

@@ -1,5 +1,18 @@
 [
   {
+    "id": "fanout-vpngate",
+    "url": "https://www.vpngate.net/api/iphone/",
+    "mirrors": [],
+    "format": "fanout",
+    "enabled": true,
+    "tier": 1,
+    "last_count": 100,
+    "status": "ok",
+    "max_nodes": 200,
+    "note": "Complete OpenVPN inventory from the same VPN Gate source consumed by local Fanout.",
+    "last_fetch": 1786104500
+  },
+  {
     "id": "au1rxx-clash",
     "url": "https://raw.githubusercontent.com/Au1rxx/free-vpn-subscriptions/main/output/clash.yaml",
     "mirrors": [
@@ -7,11 +20,12 @@
       "https://gh-proxy.com/https://raw.githubusercontent.com/Au1rxx/free-vpn-subscriptions/main/output/clash.yaml"
     ],
     "format": "clash",
-    "enabled": true,
+    "enabled": false,
     "tier": 1,
     "last_fetch": 1784114459,
-    "last_count": 400,
-    "status": "ok",
+    "last_count": 0,
+    "status": "disabled",
+    "note": "Disabled 2026-08-07: consolidated Au1rxx to sing-box after audit; this feed had 4/10 Tier-1 alive and 80.5% overlap.",
     "max_nodes": 400
   },
   {
@@ -24,9 +38,10 @@
     "format": "singbox",
     "enabled": true,
     "tier": 1,
-    "last_fetch": 1784114459,
+    "last_fetch": 1786104500,
     "last_count": 400,
     "status": "ok",
+    "note": "Retained 2026-08-07 as the sole Au1rxx feed: 343/352 TCP reachable, 6/10 Tier-1 alive, and 172 source-exclusive nodes.",
     "max_nodes": 400
   },
   {
@@ -37,11 +52,12 @@
       "https://gh-proxy.com/https://raw.githubusercontent.com/Au1rxx/free-vpn-subscriptions/main/output/v2ray-base64.txt"
     ],
     "format": "v2ray",
-    "enabled": true,
+    "enabled": false,
     "tier": 1,
     "last_fetch": 1784114459,
-    "last_count": 400,
-    "status": "ok",
+    "last_count": 0,
+    "status": "disabled",
+    "note": "Disabled 2026-08-07: consolidated Au1rxx to sing-box, which had slightly higher TCP reachability and more source-exclusive nodes.",
     "max_nodes": 400
   },
   {
@@ -65,12 +81,12 @@
       "https://cdn.jsdelivr.net/gh/mahdibland/V2RayAggregator@master/sub/airport_merge_base64.txt"
     ],
     "format": "v2ray",
-    "enabled": true,
+    "enabled": false,
     "tier": 1,
     "last_fetch": 1784114459,
-    "last_count": 61,
-    "status": "ok",
-    "note": "Verified 2026-07-15: ~61 base64 nodes. Bonus sub/sub_merge.txt has 5103 plain URIs.",
+    "last_count": 0,
+    "status": "disabled",
+    "note": "Disabled 2026-08-07: audit measured 0/61 TCP reachable and 0/20 Tier-1 alive.",
     "max_nodes": 200
   },
   {
@@ -94,12 +110,12 @@
       "https://cdn.jsdelivr.net/gh/ALIILAPRO/v2rayNG-Config@main/sub.txt"
     ],
     "format": "v2ray",
-    "enabled": true,
+    "enabled": false,
     "tier": 1,
     "last_fetch": 1784114459,
-    "last_count": 300,
-    "status": "ok",
-    "note": "Verified 2026-07-15: ~282 base64 nodes.",
+    "last_count": 0,
+    "status": "disabled",
+    "note": "Disabled 2026-08-07 after audit: 185/300 TCP reachable, 2/20 Tier-1 alive, mirror Jaccard 0.7133.",
     "max_nodes": 300
   },
   {
@@ -109,12 +125,12 @@
       "https://cdn.jsdelivr.net/gh/ts-sf/fly@main/v2"
     ],
     "format": "v2ray",
-    "enabled": true,
+    "enabled": false,
     "tier": 1,
     "last_fetch": 1784114459,
-    "last_count": 125,
-    "status": "ok",
-    "note": "Verified 2026-07-15: ~117 base64 nodes (also has clash at /main/clash).",
+    "last_count": 0,
+    "status": "disabled",
+    "note": "Disabled 2026-08-07 after audit: 105/200 TCP reachable, 2/20 Tier-1 alive, mirror Jaccard 0.3772.",
     "max_nodes": 200
   },
   {
@@ -124,12 +140,12 @@
       "https://cdn.jsdelivr.net/gh/VovaplusEXP/p-configs@main/Clash-Profiles/vless.yaml"
     ],
     "format": "clash",
-    "enabled": true,
+    "enabled": false,
     "tier": 1,
     "last_fetch": 1784114459,
-    "last_count": 71,
-    "status": "ok",
-    "note": "Verified 2026-07-15: ~105 curated vless clash nodes (speed-test-filtered, low volume high quality).",
+    "last_count": 0,
+    "status": "disabled",
+    "note": "Disabled 2026-08-07 after audit: 78/83 TCP endpoints reachable but 0/10 isolated Tier-1 proxy handshakes succeeded.",
     "max_nodes": 200
   },
   {

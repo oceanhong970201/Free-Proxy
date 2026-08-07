@@ -25,6 +25,14 @@ python src\aggregator\cli.py verify
 python src\aggregator\cli.py emit
 ```
 
+### Fanout node source
+
+`fanout-vpngate` imports the complete OpenVPN inventory from the same VPN Gate
+CSV source used by Fanout. Each node keeps its full `.ovpn` profile in
+`ProxyNode.openvpn_config`; no Fanout runtime setting is changed. OpenVPN nodes
+remain unverified by the Mihomo verifier and are excluded from Clash, sing-box,
+and V2Ray subscription output rather than being mislabeled as another protocol.
+
 發布 Worker snapshot 前設定：
 
 ```powershell

@@ -12,6 +12,7 @@ from src.aggregator.emit import (
     clash_skip_reason,
     emit_clash,
     emit_singbox,
+    emit_v2ray_b64,
     filter_alive,
     to_clash_dict,
     to_singbox_outbound,
@@ -22,6 +23,7 @@ from src.aggregator.parser import (
     node_to_uri,
     parse_clash_yaml,
     parse_singbox_json,
+    parse_raw,
     parse_uri,
 )
 
@@ -138,6 +140,64 @@ def test_shadowsocks_requires_and_preserves_method() -> None:
         emit_clash([missing_method])
     with pytest.raises(UnsupportedOutbound, match="Shadowsocks"):
         emit_singbox([missing_method])
+
+
+def test_fanout_vpngate_csv_imports_complete_openvpn_profiles() -> None:
+    config = """client
+dev tun
+proto tcp
+remote 198.51.100.10 443
+<ca>
+-----BEGIN CERTIFICATE-----
+fixture
+-----END CERTIFICATE-----
+</ca>
+"""
+    encoded = base64.b64encode(config.encode()).decode()
+    source = (
+        "*vpn_servers\n"
+        "#HostName,IP,CountryLong,CountryShort,OpenVPN_ConfigData_Base64\n"
+        f"vpn-fixture,198.51.100.10,Japan,JP,{encoded}\n"
+        "*\n"
+    )
+
+    nodes = parse_raw("fanout", source)
+
+    assert len(nodes) == 1
+    node = nodes[0]
+    assert node.proto == "openvpn"
+    assert node.host == "198.51.100.10"
+    assert node.port == 443
+    assert node.vpn_transport == "tcp"
+    assert node.country == "Japan"
+    assert node.openvpn_config == config
+    assert node.raw.startswith("openvpn://")
+    reparsed = parse_uri(node.raw)
+    assert reparsed is not None
+    assert reparsed.openvpn_config == config
+    assert reparsed.dedup_key() == node.dedup_key()
+
+    assert clash_skip_reason(node) == "protocol:openvpn"
+    assert emit_clash([node]) == {"proxies": []}
+    assert emit_singbox([node]) == {"outbounds": []}
+    assert emit_v2ray_b64([node]) == ""
+
+
+def test_fanout_vpngate_csv_rejects_unsafe_openvpn_profiles() -> None:
+    config = """client
+remote 198.51.100.10 443 tcp
+script-security 2
+up payload.sh
+<ca>
+fixture
+</ca>
+"""
+    encoded = base64.b64encode(config.encode()).decode()
+    source = (
+        "#HostName,IP,CountryLong,CountryShort,OpenVPN_ConfigData_Base64\n"
+        f"vpn-fixture,198.51.100.10,Japan,JP,{encoded}\n"
+    )
+    assert parse_raw("fanout", source) == []
 
 
 def test_anytls_uri_round_trip_and_emit() -> None:
@@ -529,6 +589,10 @@ def test_vmess_alter_id_and_httpupgrade_round_trip() -> None:
 
     changed = node.model_copy(update={"alter_id": 0})
     assert node_dedup_key(node) != node_dedup_key(changed)
+
+
+def test_vmess_parser_rejects_trailing_base64_garbage() -> None:
+    assert parse_uri(f"{_vmess_uri()}=vmess") is None
 
 
 def test_xhttp_is_native_in_clash_and_explicitly_unsupported_in_singbox() -> None:

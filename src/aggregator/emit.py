@@ -711,6 +711,8 @@ def emit_clash(nodes: list[ProxyNode]) -> dict:
     proxies: list[dict] = []
     seen_names: set[str] = set()
     for node in nodes:
+        if clash_skip_reason(node):
+            continue
         proxy = to_clash_dict(node)
         proxy["name"] = _unique_name(str(proxy["name"]), seen_names)
         proxies.append(proxy)
@@ -720,14 +722,14 @@ def emit_clash(nodes: list[ProxyNode]) -> dict:
 def clash_skip_reason(node: ProxyNode) -> str | None:
     """Return why the pinned Clash verifier cannot represent this node."""
 
-    if node.proto.lower() == "juicity":
-        return "protocol:juicity"
+    if node.proto.lower() in {"juicity", "openvpn"}:
+        return f"protocol:{node.proto.lower()}"
     return None
 
 
 def _singbox_skip_reason(node: ProxyNode) -> str | None:
     proto = node.proto.lower()
-    if proto in {"ssr", "juicity"}:
+    if proto in {"ssr", "juicity", "openvpn"}:
         return f"protocol:{proto}"
     if (node.net or "").lower() == "xhttp":
         return "transport:xhttp"
@@ -751,6 +753,8 @@ def emit_singbox(nodes: list[ProxyNode]) -> dict:
 def emit_v2ray_b64(nodes: list[ProxyNode]) -> str:
     uris: list[str] = []
     for node in nodes:
+        if node.proto.lower() == "openvpn":
+            continue
         validate_proxy_node(node)
         if node.raw:
             validate_node_raw(node)
@@ -916,14 +920,19 @@ def emit_all(
             "error": f"output conversion failed: {exc}",
         }
 
+    clash_skipped: dict[str, int] = {}
     singbox_skipped: dict[str, int] = {}
     for node in nodes:
+        clash_reason = clash_skip_reason(node)
+        if clash_reason:
+            clash_skipped[clash_reason] = clash_skipped.get(clash_reason, 0) + 1
         reason = _singbox_skip_reason(node)
         if reason:
             singbox_skipped[reason] = singbox_skipped.get(reason, 0) + 1
+    expected_clash = len(nodes) - sum(clash_skipped.values())
     expected_singbox = len(nodes) - sum(singbox_skipped.values())
     if (
-        len(clash["proxies"]) != len(nodes)
+        len(clash["proxies"]) != expected_clash
         or len(singbox["outbounds"]) != expected_singbox
     ):
         return {
@@ -1008,6 +1017,8 @@ def emit_all(
     summary["pipeline_status"] = status["pipeline_status"]
     if singbox_skipped:
         summary["singbox_skipped"] = singbox_skipped
+    if clash_skipped:
+        summary["clash_skipped"] = clash_skipped
     return summary
 
 
