@@ -276,7 +276,9 @@ def free_port() -> int:
         return int(sock.getsockname()[1])
 
 
-def wait_for_port(port: int, process: subprocess.Popen[Any], timeout: float = 10) -> None:
+def wait_for_port(
+    port: int, process: subprocess.Popen[Any], timeout: float = 10
+) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if process.poll() is not None:
@@ -362,7 +364,14 @@ def verify_bridge(
     }
     atomic_write(validation_path, dump_yaml(validation))
 
-    syntax_command = [str(core), "-t", "-d", str(bridge_dir), "-f", str(validation_path)]
+    syntax_command = [
+        str(core),
+        "-t",
+        "-d",
+        str(bridge_dir),
+        "-f",
+        str(validation_path),
+    ]
     syntax = subprocess.run(
         syntax_command, check=False, capture_output=True, text=True, timeout=30
     )

@@ -118,11 +118,7 @@ def test_build_profile_plan_registers_dedicated_remote_profile(tmp_path: Path) -
     assert profiles_document["current"] == PROFILE_UID
     assert by_uid[PROFILE_UID]["url"] == "https://example.test/clash.yaml"
     assert by_uid[PROFILE_UID]["option"]["proxies"] == PROFILE_LINKS["proxies"]
-    proxy_document = yaml.safe_load(
-        plan[profiles / f"{PROFILE_LINKS['proxies']}.yaml"]
-    )
-    group_document = yaml.safe_load(
-        plan[profiles / f"{PROFILE_LINKS['groups']}.yaml"]
-    )
+    proxy_document = yaml.safe_load(plan[profiles / f"{PROFILE_LINKS['proxies']}.yaml"])
+    group_document = yaml.safe_load(plan[profiles / f"{PROFILE_LINKS['groups']}.yaml"])
     assert proxy_document["append"] == [proxy]
     assert group_document["append"][0]["proxies"] == [proxy["name"]]
