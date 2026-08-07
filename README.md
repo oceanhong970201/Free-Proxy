@@ -33,6 +33,23 @@ CSV source used by Fanout. Each node keeps its full `.ovpn` profile in
 remain unverified by the Mihomo verifier and are excluded from Clash, sing-box,
 and V2Ray subscription output rather than being mislabeled as another protocol.
 
+Clash Verge can use the OpenVPN exits through Fanout's loopback-only SOCKS5
+bridge. Exit Clash Verge before syncing so it reloads both enhancement files on
+the next start:
+
+```powershell
+python tools\sync_fanout_clash_verge.py
+```
+
+The command creates or updates a dedicated `Free-Proxy + Fanout` remote profile,
+selects it, and adds the currently `up` Fanout slots as a `Fanout OpenVPN`
+group. The normal proxies continue to refresh from this repository's GitHub Raw
+`output/clash.yaml`; the local overlay is verified through Clash Verge's bundled
+Mihomo core. Fanout settings are not changed. Runtime SOCKS5 credentials remain
+under the local Clash Verge data directory and are never written to the
+repository or public subscription artifacts. The command also creates a local
+backup, patch, verification record, and tested rollback script.
+
 發布 Worker snapshot 前設定：
 
 ```powershell
