@@ -176,12 +176,36 @@ def _pipeline_status_document(
     rss_items: int,
     generated_at: str | None = None,
 ) -> dict:
-    """Build the only public status shape from count-only local inputs."""
+    """Build the public status for the verifier-eligible subscription pool."""
 
-    alive = sum(node.alive is True for node in all_nodes)
-    dead = sum(node.alive is False for node in all_nodes)
-    unverified = sum(node.alive is None for node in all_nodes)
-    total = len(all_nodes)
+    snapshot_unverified = sum(node.alive is None for node in all_nodes)
+    if _count(verify_summary.get("unverified"), "unverified") != snapshot_unverified:
+        raise InvalidPipelineStatus(
+            "verify unverified count does not match live snapshot"
+        )
+    unsupported = _count(
+        verify_summary.get("unsupported_for_verifier", 0),
+        "unsupported_for_verifier",
+    )
+    excluded_openvpn = [
+        node
+        for node in all_nodes
+        if node.alive is None and node.proto.lower() == "openvpn"
+    ]
+    if len(excluded_openvpn) != snapshot_unverified:
+        raise InvalidPipelineStatus(
+            "healthy public snapshot contains unverified publishable nodes"
+        )
+    if len(excluded_openvpn) > unsupported:
+        raise InvalidPipelineStatus(
+            "verify unsupported count does not cover excluded OpenVPN nodes"
+        )
+
+    status_nodes = [node for node in all_nodes if node.alive is not None]
+    alive = sum(node.alive is True for node in status_nodes)
+    dead = sum(node.alive is False for node in status_nodes)
+    unverified = 0
+    total = len(status_nodes)
     verified = alive + dead
 
     if verify_summary.get("success") is not True:
@@ -192,11 +216,6 @@ def _pipeline_status_document(
     tier2_passed = _count(verify_summary.get("tier2_passed"), "tier2_passed")
     if _count(verify_summary.get("total_alive"), "total_alive") != alive:
         raise InvalidPipelineStatus("verify alive count does not match live snapshot")
-    if _count(verify_summary.get("unverified"), "unverified") != unverified:
-        raise InvalidPipelineStatus(
-            "verify unverified count does not match live snapshot"
-        )
-
     document = {
         "schema_version": PIPELINE_STATUS_SCHEMA_VERSION,
         "generated_at": generated_at or _utc_rfc3339(),

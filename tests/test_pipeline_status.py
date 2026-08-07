@@ -111,6 +111,73 @@ def test_healthy_status_is_deterministic_and_contains_only_counts() -> None:
     assert "error" not in serialized
 
 
+def test_healthy_status_excludes_unverified_openvpn_from_public_pool() -> None:
+    publishable = _node(suffix="1", alive=True, secret="fixture")
+    openvpn = ProxyNode(
+        proto="openvpn",
+        host="198.51.100.10",
+        port=443,
+        openvpn_config="client\nremote 198.51.100.10 443 tcp\n<ca>\nfixture\n</ca>\n",
+        vpn_transport="tcp",
+        raw="openvpn://fixture",
+        alive=None,
+    )
+
+    document = emit._pipeline_status_document(
+        [publishable, openvpn],
+        verify_summary={
+            "success": True,
+            "completed": True,
+            "tier1_alive": 1,
+            "tier2_passed": 1,
+            "total_alive": 1,
+            "unverified": 1,
+            "unsupported_for_verifier": 1,
+        },
+        clash_proxies=1,
+        singbox_outbounds=1,
+        rss_items=1,
+        generated_at=FIXED_TIME,
+    )
+
+    assert document["pipeline_status"] == "healthy"
+    assert document["verify"] == {
+        "total": 1,
+        "verified": 1,
+        "alive": 1,
+        "dead": 0,
+        "unverified": 0,
+        "tier1_alive": 1,
+        "tier2_passed": 1,
+        "completed": True,
+    }
+
+
+def test_healthy_status_rejects_unverified_publishable_nodes() -> None:
+    unverified = _node(suffix="1", alive=None, secret="fixture")
+
+    with pytest.raises(
+        emit.InvalidPipelineStatus,
+        match="unverified publishable nodes",
+    ):
+        emit._pipeline_status_document(
+            [unverified],
+            verify_summary={
+                "success": True,
+                "completed": True,
+                "tier1_alive": 0,
+                "tier2_passed": 0,
+                "total_alive": 0,
+                "unverified": 1,
+                "unsupported_for_verifier": 1,
+            },
+            clash_proxies=0,
+            singbox_outbounds=0,
+            rss_items=0,
+            generated_at=FIXED_TIME,
+        )
+
+
 def test_unknown_bootstrap_is_schema_valid_but_not_ci_healthy() -> None:
     document = {
         "schema_version": 1,
