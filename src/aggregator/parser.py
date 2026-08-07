@@ -129,7 +129,7 @@ def _sanitize_openvpn_config(raw: str) -> tuple[str, str, int, str]:
     if not 1 <= port <= 65535:
         raise ValueError("OpenVPN remote port is invalid")
     proto_match = _OPENVPN_PROTO_RE.search(config)
-    raw_transport = (remote.group(3) or (proto_match.group(1) if proto_match else "udp"))
+    raw_transport = remote.group(3) or (proto_match.group(1) if proto_match else "udp")
     transport = "tcp" if raw_transport.lower().startswith("tcp") else "udp"
     return config.rstrip() + "\n", host, port, transport
 
