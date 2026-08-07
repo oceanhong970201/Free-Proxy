@@ -34,7 +34,9 @@ uses `clash-speedtest v1.8.8` rebuilt against Mihomo `v1.19.29`, so supported
 profiles are tested and emitted as native Clash `type: openvpn` proxies. That
 verifier build includes Mihomo's `with_gvisor` tag, which OpenVPN needs for its
 userspace TUN stack. The Worker decodes the complete `openvpn://` profile into
-the same Mihomo fields.
+the same Mihomo fields. Strict Worker publishing accepts OpenVPN only after its
+successful tunnel probe; the download-speed floor remains mandatory for other
+protocols.
 
 Native OpenVPN output requires Clash Verge Rev `v2.5.2` (Mihomo `v1.19.29`) or
 newer. Refreshing the normal Worker subscription is sufficient; Fanout does not

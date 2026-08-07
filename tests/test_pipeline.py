@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import yaml
 import pytest
 
-from aggregator import cli, emit, fetcher, tcp_prefilter, vpnsuper_feed
+from aggregator import cli, emit, fetcher, parser, tcp_prefilter, vpnsuper_feed
 from aggregator.models import ProxyNode
 
 
@@ -261,6 +261,49 @@ def test_publish_excludes_unverified_and_checks_snapshot_contract(
     assert [node["uri"] for node in captured["json"]["nodes"]] == [verified.raw]
     assert captured["json"]["nodes"][0]["model"]["raw"] == verified.raw
     assert captured["json"]["nodes"][0]["model"]["uuid"] == verified.uuid
+
+
+def test_strict_publish_reserves_verified_openvpn_capacity() -> None:
+    fast = ProxyNode(
+        proto="vless",
+        host="edge.example",
+        port=443,
+        uuid="00000000-0000-0000-0000-000000000001",
+        raw="vless://00000000-0000-0000-0000-000000000001@edge.example:443",
+        alive=True,
+        latency_ms=50,
+        download_speed=20,
+    )
+    openvpn = ProxyNode(
+        proto="openvpn",
+        host="198.51.100.20",
+        port=1194,
+        username="vpn",
+        password="vpn",
+        vpn_transport="udp",
+        openvpn_config=(
+            "client\nproto udp\nremote 198.51.100.20 1194\n"
+            "cipher AES-128-CBC\nauth SHA1\n<ca>\nfixture\n</ca>\n"
+        ),
+        raw="",
+        alive=True,
+        latency_ms=120,
+        download_speed=None,
+    )
+    openvpn.raw = parser.node_to_uri(openvpn)
+
+    assert cli._select_publish_nodes(
+        [fast, openvpn], strict=True, min_dl=5, top_n=1
+    ) == [openvpn]
+    assert cli._select_publish_nodes(
+        [fast, openvpn], strict=True, min_dl=5, top_n=2
+    ) == [fast, openvpn]
+    assert cli._select_publish_nodes(
+        [fast, openvpn.model_copy(update={"alive": None})],
+        strict=True,
+        min_dl=5,
+        top_n=2,
+    ) == [fast]
 
 
 def test_publish_rejects_cleartext_non_loopback_worker_url(monkeypatch, tmp_path):

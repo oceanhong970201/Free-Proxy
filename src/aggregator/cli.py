@@ -1382,6 +1382,42 @@ def _verify_candidate_isolated(
         STATE, DB, LIVE, LAST_RUN = original_paths
 
 
+def _publish_sort_key(node: ProxyNode) -> tuple[float, int, str]:
+    return (
+        -(node.download_speed if node.download_speed is not None else -1.0),
+        node.latency_ms if node.latency_ms is not None else 10**9,
+        node.raw,
+    )
+
+
+def _select_publish_nodes(
+    all_nodes: list[ProxyNode], *, strict: bool, min_dl: float, top_n: int
+) -> list[ProxyNode]:
+    verified = [node for node in all_nodes if node.alive is True]
+    limit = max(0, top_n)
+    if not strict:
+        return sorted(verified, key=_publish_sort_key)[:limit]
+
+    # OpenVPN's Tier-1 verifier establishes the tunnel and sends a warmup HTTP
+    # request through it. Reserve those verified exits before applying the
+    # throughput floor, which remains mandatory for every other protocol.
+    openvpn = sorted(
+        [node for node in verified if node.proto.lower() == "openvpn"],
+        key=_publish_sort_key,
+    )[:limit]
+    speed_qualified = sorted(
+        [
+            node
+            for node in verified
+            if node.proto.lower() != "openvpn"
+            and node.download_speed is not None
+            and node.download_speed >= min_dl
+        ],
+        key=_publish_sort_key,
+    )[: max(0, limit - len(openvpn))]
+    return sorted([*speed_qualified, *openvpn], key=_publish_sort_key)
+
+
 def _publish_logic(strict: bool = False) -> dict:
     """Publish one complete, verified snapshot to the Cloudflare Worker."""
     import httpx
@@ -1420,21 +1456,12 @@ def _publish_logic(strict: bool = False) -> dict:
         _write_last_run(1, {"publish": summary}, extra={"last_stage_cmd": "publish"})
         return summary
 
-    selected = [n for n in all_nodes if n.alive is True]
-    if strict:
-        selected = [
-            n
-            for n in selected
-            if n.download_speed is not None and n.download_speed >= min_dl
-        ]
-    selected.sort(
-        key=lambda n: (
-            -(n.download_speed if n.download_speed is not None else -1.0),
-            n.latency_ms if n.latency_ms is not None else 10**9,
-            n.raw,
-        )
+    selected = _select_publish_nodes(
+        all_nodes,
+        strict=strict,
+        min_dl=min_dl,
+        top_n=top_n,
     )
-    selected = selected[:top_n]
 
     if not selected:
         summary = {
@@ -1536,11 +1563,14 @@ def _publish_logic(strict: bool = False) -> dict:
         )
         if not ok:
             raise RuntimeError(f"Worker import contract mismatch: {body}")
+        published_openvpn = sum(node.proto.lower() == "openvpn" for node in selected)
         console.print(
-            f"[green]Worker snapshot {snapshot_id} imported: {len(selected)} nodes"
+            f"[green]Worker snapshot {snapshot_id} imported: {len(selected)} nodes "
+            f"({published_openvpn} OpenVPN)"
         )
         summary = {
             "published": len(selected),
+            "published_openvpn": published_openvpn,
             "http_status": resp.status_code,
             "snapshot_id": snapshot_id,
             "strict": strict,
@@ -2638,10 +2668,13 @@ def publish(
     strict: bool = typer.Option(
         False,
         "--strict",
-        help="Require the configured download-speed floor. Both modes exclude unverified nodes.",
+        help=(
+            "Require the download-speed floor for non-OpenVPN nodes; OpenVPN "
+            "requires a successful tunnel probe. Both modes exclude unverified nodes."
+        ),
     ),
 ) -> None:
-    """Publish top-N alive nodes (by download_speed) to the Cloudflare Worker."""
+    """Publish the top-N verified nodes to the Cloudflare Worker."""
     console.rule("[bold magenta]publish")
     summary = _publish_logic(strict=strict)
     _print_table("publish summary", summary)
